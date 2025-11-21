@@ -1,11 +1,10 @@
 # config.py
 # Central configuration for NHL Monte Carlo Model
-# Edit this file only — never touch nhl_monte_carlo.py again
 
 from datetime import datetime
 
 # =============================================================================
-# AUTO-DETECTED VALUES (no need to change)
+# AUTO-GENERATED VALUES
 # =============================================================================
 TODAY = datetime.now()
 CURRENT_SEASON_START_YEAR = 2025 if TODAY.month >= 7 else 2024
@@ -18,18 +17,19 @@ TODAY_PRETTY = TODAY.strftime("%B %d, %Y")
 # =============================================================================
 # FILE NAMES & PATHS
 # =============================================================================
-DB_FILE = f"nhl_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}_players.db"
-SCHEDULE_CSV = f"schedule_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}.csv"
-PREDICTIONS_CSV = f"nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
+DB_FILE = f"data/db/nhl_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}_players.db"
+SCHEDULE_CSV = f"data/schedule/schedule_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}.csv"
+PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 
 # =============================================================================
 # SIMULATION SETTINGS
 # =============================================================================
-N_SIMS_FULL = 26                       # Full season simulations
-N_SIMS_TODAY = 13                      # Simulations per today's game
+N_SIMS_FULL = 1000                       # Full season simulations
+N_SIMS_TODAY = 500                      # Simulations per today's game
 HOME_ICE_ADVANTAGE = 1.10
 LEAGUE_AVG_XG_PER_60 = 2.95
 OT_HOME_WIN_PROB = 0.55                # Historical: ~55% of OT/SO won by home team
+TEAM_STRENGTH_VARIANCE = 0.08          # ±8% game-to-game variance (injuries, form, etc.)
 
 # =============================================================================
 # DATA FILTERS
