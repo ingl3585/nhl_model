@@ -18,9 +18,9 @@ TODAY_PRETTY = TODAY.strftime("%B %d, %Y")
 # =============================================================================
 # FILE NAMES & PATHS
 # =============================================================================
-DB_FILE = f"nhl_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}_players.db"
-SCHEDULE_CSV = f"schedule_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}.csv"
-PREDICTIONS_CSV = f"nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
+DB_FILE = f"data/db/nhl_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}_players.db"
+SCHEDULE_CSV = f"data/schedule/schedule_{CURRENT_SEASON_START_YEAR}_{CURRENT_SEASON_END_YEAR}.csv"
+PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 
 # =============================================================================
 # SIMULATION SETTINGS

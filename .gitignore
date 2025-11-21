@@ -1,3 +1,6 @@
 __pycache__
-*.db
-*.csv
+.claude
+CLAUDE.md
+data/db/*.db
+data/schedule/*.csv
+data/results/*.csv
