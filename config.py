@@ -1,11 +1,10 @@
 # config.py
 # Central configuration for NHL Monte Carlo Model
-# Edit this file only — never touch nhl_monte_carlo.py again
 
 from datetime import datetime
 
 # =============================================================================
-# AUTO-DETECTED VALUES (no need to change)
+# AUTO-GENERATED VALUES
 # =============================================================================
 TODAY = datetime.now()
 CURRENT_SEASON_START_YEAR = 2025 if TODAY.month >= 7 else 2024
