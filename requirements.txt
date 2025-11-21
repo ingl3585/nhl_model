@@ -1,4 +1,7 @@
-pandas 
-numpy 
-beautifulsoup4 
-selenium
+# Install all dependencies: pip install -r requirements.txt
+
+pandas
+numpy
+beautifulsoup4
+requests
+tqdm

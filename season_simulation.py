@@ -3,6 +3,7 @@
 
 import pandas as pd
 from collections import defaultdict, Counter
+from tqdm import tqdm
 from game_simulation import simulate_game
 from playoff_simulation import simulate_playoffs
 
@@ -112,10 +113,7 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
 
     print(f"\nRunning {n_sims:,} full-season simulations on {len(remaining_games)} games...")
 
-    for sim in range(n_sims):
-        if show_progress_every and sim % show_progress_every == 0 and sim > 0:
-            print(f"   → {sim:,}/{n_sims:,} simulations complete")
-
+    for sim in tqdm(range(n_sims), desc="Season simulations", unit="sim"):
         standings = current_standings.copy(deep=True)
 
         # Simulate remaining games
