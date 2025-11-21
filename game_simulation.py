@@ -2,6 +2,7 @@
 # Single game simulation logic
 
 import numpy as np
+from tqdm import tqdm
 from config import HOME_ICE_ADVANTAGE, LEAGUE_AVG_XG_PER_60, OT_HOME_WIN_PROB, N_SIMS_TODAY, TEAM_STRENGTH_VARIANCE
 from team_strength import get_team_strength
 
@@ -62,7 +63,8 @@ def predict_todays_games(today_games, db_path):
 
         home_wins = home_goals = away_goals = 0
 
-        for _ in range(N_SIMS_TODAY):
+        # Progress bar for each game's simulations
+        for _ in tqdm(range(N_SIMS_TODAY), desc=f"{away} @ {home}", leave=False, unit="sim"):
             winner, hpts, apts, hgf, agf, reg = simulate_game(home, away, db_path)
             home_goals += hgf
             away_goals += agf
