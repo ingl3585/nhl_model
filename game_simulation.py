@@ -2,7 +2,7 @@
 # Single game simulation logic
 
 import numpy as np
-from config import HOME_ICE_ADVANTAGE, LEAGUE_AVG_XG_PER_60, OT_HOME_WIN_PROB, N_SIMS_TODAY
+from config import HOME_ICE_ADVANTAGE, LEAGUE_AVG_XG_PER_60, OT_HOME_WIN_PROB, N_SIMS_TODAY, TEAM_STRENGTH_VARIANCE
 from team_strength import get_team_strength
 
 
@@ -20,6 +20,13 @@ def simulate_game(home, away, db_path):
     """
     ho, hd = get_team_strength(home, db_path)
     ao, ad = get_team_strength(away, db_path)
+
+    # Apply game-to-game variance (injuries, lineup changes, form, etc.)
+    if TEAM_STRENGTH_VARIANCE > 0:
+        ho *= np.random.uniform(1 - TEAM_STRENGTH_VARIANCE, 1 + TEAM_STRENGTH_VARIANCE)
+        hd *= np.random.uniform(1 - TEAM_STRENGTH_VARIANCE, 1 + TEAM_STRENGTH_VARIANCE)
+        ao *= np.random.uniform(1 - TEAM_STRENGTH_VARIANCE, 1 + TEAM_STRENGTH_VARIANCE)
+        ad *= np.random.uniform(1 - TEAM_STRENGTH_VARIANCE, 1 + TEAM_STRENGTH_VARIANCE)
 
     home_xg = ho * HOME_ICE_ADVANTAGE * (LEAGUE_AVG_XG_PER_60 / ad)
     away_xg = ao * (LEAGUE_AVG_XG_PER_60 / hd)
