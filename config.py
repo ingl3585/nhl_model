@@ -24,8 +24,8 @@ PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 # =============================================================================
 # SIMULATION SETTINGS
 # =============================================================================
-N_SIMS_FULL = 10                        # Full season simulations
-N_SIMS_TODAY = 1000                     # Simulations per today's game
+N_SIMS_FULL = 25                       # Full season simulations
+N_SIMS_TODAY = 500                     # Simulations per today's game
 HOME_ICE_ADVANTAGE = 1.10
 LEAGUE_AVG_XG_PER_60 = 2.95
 OT_HOME_WIN_PROB = 0.55                # Historical: ~55% of OT/SO won by home team
@@ -37,6 +37,12 @@ TEAM_STRENGTH_VARIANCE = 0.09          # ±9% game-to-game variance (injuries, f
 MIN_TOI_MINUTES = 60                   # Players must have >60 min 5v5 TOI
 FALLBACK_OFFENSIVE_RATING = 2.80       # xGF/60 if no data
 FALLBACK_DEFENSIVE_RATING = 2.80       # xGA/60 if no data
+
+# =============================================================================
+# RECENT FORM WEIGHTING
+# =============================================================================
+RECENT_FORM_WEIGHT = 0.60  # 60% recent (last 10 games), 40% full season
+                           # Set to 0.5 for equal weight, 1.0 for recent only
 
 # =============================================================================
 # DISPLAY SETTINGS

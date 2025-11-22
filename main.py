@@ -3,11 +3,7 @@
 
 import pandas as pd
 import time
-from config import (
-    CURRENT_SEASON_FULL, TODAY_PRETTY, N_SIMS_FULL, N_SIMS_TODAY,
-    SHOW_TODAYS_GAMES, TODAY_STR, SCHEDULE_CSV, DB_FILE, PREDICTIONS_CSV,
-    SHOW_PROGRESS_EVERY
-)
+from config import *
 from nhl_schedule import scrape_schedule, get_todays_games
 from nhl_rosters import download_nst_data
 from game_simulation import predict_todays_games
@@ -26,7 +22,7 @@ schedule = scrape_schedule(output_path=SCHEDULE_CSV)
 current_standings = build_current_standings(schedule)
 
 # Step 3: Download player data
-download_nst_data(DB_FILE)
+download_nst_data(DB_FILE, recent_weight=RECENT_FORM_WEIGHT)
 
 # Step 4: Today's games predictions (if enabled)
 if SHOW_TODAYS_GAMES:
@@ -80,3 +76,7 @@ print("=" * 100)
 print(final_df.to_string(index=False))
 print(f"\nResults saved → {PREDICTIONS_CSV}")
 final_df.to_csv(PREDICTIONS_CSV, index=False)
+
+if SHOW_ROSTER_DUMP:
+    from nhl_rosters import view_team_rosters
+    view_team_rosters(DB_FILE)
