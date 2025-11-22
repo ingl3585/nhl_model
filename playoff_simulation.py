@@ -59,8 +59,21 @@ def simulate_playoffs(playoff_teams, final_standings, db_path):
         db_path (str): Path to player database
 
     Returns:
-        str or None: Stanley Cup winner (None if insufficient teams)
+        dict: Dictionary with playoff results by round
+            {
+                'round1': [list of 8 teams that won round 1],
+                'round2': [list of 4 teams that won round 2],
+                'conf_finals': [list of 2 teams that won conference finals],
+                'cup_winner': team name or None
+            }
     """
+    results = {
+        'round1': [],
+        'round2': [],
+        'conf_finals': [],
+        'cup_winner': None
+    }
+    
     # Split into conferences
     east = [t for t in playoff_teams if t in DIVISIONS["Atlantic"] + DIVISIONS["Metropolitan"]]
     west = [t for t in playoff_teams if t in DIVISIONS["Central"] + DIVISIONS["Pacific"]]
@@ -69,28 +82,55 @@ def simulate_playoffs(playoff_teams, final_standings, db_path):
     east.sort(key=lambda x: final_standings[final_standings.team == x].index[0])
     west.sort(key=lambda x: final_standings[final_standings.team == x].index[0])
 
-    # Simulate conference playoffs
+    # ROUND 1 (8 teams -> 4 teams per conference)
+    if len(east) >= 2:
+        east_r1 = [best_of_7(east[i], east[i+1], home_first=True, db_path=db_path)
+                   for i in range(0, len(east), 2)]
+        results['round1'].extend(east_r1)
+        east = east_r1
+    
+    if len(west) >= 2:
+        west_r1 = [best_of_7(west[i], west[i+1], home_first=True, db_path=db_path)
+                   for i in range(0, len(west), 2)]
+        results['round1'].extend(west_r1)
+        west = west_r1
+
+    # ROUND 2 (4 teams -> 2 teams per conference)
+    if len(east) >= 2:
+        east_r2 = [best_of_7(east[i], east[i+1], home_first=True, db_path=db_path)
+                   for i in range(0, len(east), 2)]
+        results['round2'].extend(east_r2)
+        east = east_r2
+    
+    if len(west) >= 2:
+        west_r2 = [best_of_7(west[i], west[i+1], home_first=True, db_path=db_path)
+                   for i in range(0, len(west), 2)]
+        results['round2'].extend(west_r2)
+        west = west_r2
+
+    # CONFERENCE FINALS (2 teams -> 1 team per conference)
     east_champ = None
     west_champ = None
-
+    
     if len(east) >= 2:
-        while len(east) > 1:
-            east = [best_of_7(east[i], east[i+1], home_first=True, db_path=db_path)
-                    for i in range(0, len(east), 2)]
+        east_champ = best_of_7(east[0], east[1], home_first=True, db_path=db_path)
+        results['conf_finals'].append(east_champ)
+    elif len(east) == 1:
         east_champ = east[0]
-
+        results['conf_finals'].append(east_champ)
+    
     if len(west) >= 2:
-        while len(west) > 1:
-            west = [best_of_7(west[i], west[i+1], home_first=True, db_path=db_path)
-                    for i in range(0, len(west), 2)]
+        west_champ = best_of_7(west[0], west[1], home_first=True, db_path=db_path)
+        results['conf_finals'].append(west_champ)
+    elif len(west) == 1:
         west_champ = west[0]
+        results['conf_finals'].append(west_champ)
 
-    # Stanley Cup Final
+    # STANLEY CUP FINAL
     if east_champ and west_champ:
-        # Higher seed gets home ice
         home_first = final_standings[final_standings.team == east_champ].index[0] < \
                      final_standings[final_standings.team == west_champ].index[0]
         cup_winner = best_of_7(east_champ, west_champ, home_first, db_path)
-        return cup_winner
+        results['cup_winner'] = cup_winner
 
-    return None
+    return results

@@ -47,7 +47,7 @@ if SHOW_TODAYS_GAMES:
 
 # Step 5: Full season Monte Carlo simulations
 start_time = time.time()
-playoff_counter, cup_counter, pres_counter = simulate_full_season(
+playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter = simulate_full_season(
     schedule,
     current_standings,
     N_SIMS_FULL,
@@ -64,15 +64,18 @@ for team in all_teams:
     results.append({
         "Team": team,
         "Playoff %": f"{playoff_counter[team]/N_SIMS_FULL:.1%}",
-        "President's Trophy %": f"{pres_counter[team]/N_SIMS_FULL:.2%}",
-        "Stanley Cup %": f"{cup_counter[team]/N_SIMS_FULL:.2%}"
+        "Round 2 %": f"{round1_counter[team]/N_SIMS_FULL:.1%}",
+        "Conf Finals %": f"{round2_counter[team]/N_SIMS_FULL:.1%}",
+        "Finals %": f"{conf_finals_counter[team]/N_SIMS_FULL:.1%}",
+        "Stanley Cup %": f"{cup_counter[team]/N_SIMS_FULL:.1%}",
+        "President's Trophy %": f"{pres_counter[team]/N_SIMS_FULL:.1%}"
     })
 
 final_df = pd.DataFrame(results).sort_values("Playoff %", ascending=False)
 
-print("\n" + "=" * 100)
-print(f"NHL {CURRENT_SEASON_FULL} FINAL RESULTS — {N_SIMS_FULL:,} sims in {elapsed:.0f}s".center(100))
-print("=" * 100)
+print("\n" + "=" * 120)
+print(f"NHL {CURRENT_SEASON_FULL} FINAL RESULTS — {N_SIMS_FULL:,} sims in {elapsed:.0f}s".center(120))
+print("=" * 120)
 print(final_df.to_string(index=False))
 print(f"\nResults saved → {PREDICTIONS_CSV}")
 final_df.to_csv(PREDICTIONS_CSV, index=False)

@@ -102,12 +102,15 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
         show_progress_every (int, optional): Print progress every N simulations
 
     Returns:
-        tuple: (playoff_counter, cup_counter, pres_counter) as Counter objects
+        tuple: (playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter)
     """
     remaining_games = schedule_df[~schedule_df.played]
     all_teams = sorted(current_standings.team.unique())
 
     playoff_counter = Counter()
+    round1_counter = Counter()
+    round2_counter = Counter()
+    conf_finals_counter = Counter()
     cup_counter = Counter()
     pres_counter = Counter()
 
@@ -149,9 +152,20 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
         for t in playoff_teams:
             playoff_counter[t] += 1
 
-        # Simulate playoffs
-        cup_winner = simulate_playoffs(playoff_teams, final, db_path)
-        if cup_winner:
-            cup_counter[cup_winner] += 1
+        # Simulate playoffs and track each round
+        playoff_results = simulate_playoffs(playoff_teams, final, db_path)
+        
+        # Count teams advancing through each round
+        for team in playoff_results['round1']:
+            round1_counter[team] += 1
+        
+        for team in playoff_results['round2']:
+            round2_counter[team] += 1
+        
+        for team in playoff_results['conf_finals']:
+            conf_finals_counter[team] += 1
+        
+        if playoff_results['cup_winner']:
+            cup_counter[playoff_results['cup_winner']] += 1
 
-    return playoff_counter, cup_counter, pres_counter
+    return playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter
