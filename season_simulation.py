@@ -30,7 +30,7 @@ def build_current_standings(schedule_df):
     Returns:
         pd.DataFrame: Current standings with points, ROW, OTW, GF, GA
     """
-    standings = defaultdict(lambda: {"points": 0, "row": 0, "otw": 0, "gf": 0, "ga": 0, "gp": 0})
+    standings = defaultdict(lambda: {"points": 0, "row": 0, "gf": 0, "ga": 0, "gp": 0})
 
     for _, g in schedule_df[schedule_df.played].iterrows():
         h, a = g.home, g.visitor
@@ -49,11 +49,11 @@ def build_current_standings(schedule_df):
             standings[a]["row"] += 1
         elif g.hg > g.vg:
             standings[h]["points"] += 2
-            standings[h]["otw"] += 1
+            standings[h]["row"] += 1  # ROW includes OT/SO wins
             standings[a]["points"] += 1
         else:
             standings[a]["points"] += 2
-            standings[a]["otw"] += 1
+            standings[a]["row"] += 1  # ROW includes OT/SO wins
             standings[h]["points"] += 1
 
     df = pd.DataFrame.from_dict(standings, orient="index").reset_index().rename(columns={"index": "team"})
@@ -76,7 +76,7 @@ def get_playoff_teams(final_standings):
     # Top 3 from each division
     for div, teams in DIVISIONS.items():
         div_df = final_standings[final_standings.team.isin(teams)].copy()
-        div_df = div_df.sort_values(by=["points", "row", "otw", "gf-ga", "gf"], ascending=False)
+        div_df = div_df.sort_values(by=["points", "row", "gf-ga", "gf"], ascending=False)
         playoff.extend(div_df.head(3).team.tolist())
 
     # Wildcards
@@ -129,18 +129,14 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
 
             standings.loc[h_idx, ["points", "gf", "ga"]] += [hpts, hgf, agf]
             standings.loc[a_idx, ["points", "gf", "ga"]] += [apts, agf, hgf]
-            if hpts == 2 and reg:
+            if hpts == 2:  # ROW includes all 2-pt wins (regulation + OT/SO)
                 standings.loc[h_idx, "row"] += 1
-            if apts == 2 and reg:
+            if apts == 2:  # ROW includes all 2-pt wins
                 standings.loc[a_idx, "row"] += 1
-            if hpts == 2:
-                standings.loc[h_idx, "otw"] += 1
-            if apts == 2:
-                standings.loc[a_idx, "otw"] += 1
 
         standings["gf-ga"] = standings["gf"] - standings["ga"]
         final = standings.sort_values(
-            by=["points", "row", "otw", "gf-ga", "gf"],
+            by=["points", "row", "gf-ga", "gf"],
             ascending=False
         ).reset_index(drop=True)
 

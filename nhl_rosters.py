@@ -7,7 +7,7 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 from io import StringIO
-from config import TEAM_ABBREV_FIXES, MIN_TOI_MINUTES, RECENT_FORM_WEIGHT
+from config import TEAM_ABBREV_FIXES, MIN_TOI_MINUTES, RECENT_FORM_WEIGHT, SHOW_ROSTER_DUMP
 
 # Team mappings (consistent with schedule module)
 TEAM_MAP = {
@@ -23,7 +23,7 @@ TEAM_MAP = {
     "SJS": "San Jose Sharks", "S.J": "San Jose Sharks",
     "SEA": "Seattle Kraken", "STL": "St. Louis Blues",
     "TBL": "Tampa Bay Lightning", "T.B": "Tampa Bay Lightning",
-    "TOR": "Toronto Maple Leafs", "UTA": "Utah Hockey Club",
+    "TOR": "Toronto Maple Leafs", "UTA": "Utah Mammoth",
     "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights",
     "WSH": "Washington Capitals", "WPG": "Winnipeg Jets"
 }
@@ -72,6 +72,10 @@ def download_nst_stats(url, headers, dataset_name):
         else:
             df = pd.read_html(StringIO(r.text))[0]
 
+        # NST's first column is player ID (unnamed) - rename it for unique identification
+        if df.columns[0] in [0, '', 'Unnamed: 0']:
+            df.rename(columns={df.columns[0]: 'Player_ID'}, inplace=True)
+
         print(f"   ✓ {dataset_name}: {len(df)} players")
         return df
 
@@ -106,16 +110,16 @@ def merge_and_weight_stats(full_df, recent_df, recent_weight=0.70):
     full_df["Team"] = full_df["Team"].apply(clean_team_name)
     recent_df["Team"] = recent_df["Team"].apply(clean_team_name)
 
-    # Merge on Player + Team
+    # Merge on Player_ID + Team (unique identification)
     merged = full_df.merge(
         recent_df,
-        on=["Player", "Team"],
+        on=["Player_ID", "Team"],
         how="left",
         suffixes=("_full", "_recent")
     )
 
     # Identify columns to keep as-is (non-numeric or special columns)
-    keep_as_is = ["Player", "Team", "Position", "GP", "Games Played"]
+    keep_as_is = ["Player_ID", "Player", "Team", "Position", "GP", "Games Played"]
     
     # Identify numeric columns to weight
     stats_to_weight = []
@@ -131,7 +135,8 @@ def merge_and_weight_stats(full_df, recent_df, recent_weight=0.70):
 
     # Build weighted dataframe
     weighted = pd.DataFrame()
-    weighted["Player"] = merged["Player"]
+    weighted["Player_ID"] = merged["Player_ID"]
+    weighted["Player"] = merged.get("Player_full", merged.get("Player"))
     weighted["Team"] = merged["Team"]
 
     # Keep GP from full season (accurate games played)
@@ -166,35 +171,44 @@ def merge_and_weight_stats(full_df, recent_df, recent_weight=0.70):
     return weighted
 
 
-def download_nst_data(db_path, recent_weight=0.70):
+def download_nst_data(db_path, recent_weight=None):
     """
     Download live player stats from Natural Stat Trick with recent form weighting.
 
     Args:
         db_path (str): Path to SQLite database file
-        recent_weight (float): Weight for last 10 games (0-1), default 0.70
+        recent_weight (float): Weight for last 10 games (0-1), uses RECENT_FORM_WEIGHT from config if None
 
     Returns:
         pd.DataFrame: Weighted player data (skaters + goalies)
     """
+    if recent_weight is None:
+        recent_weight = RECENT_FORM_WEIGHT  # Use config value
+
     print(f"Downloading live 2025-26 player stats from Natural Stat Trick...")
     print(f"   Weighting: {recent_weight:.0%} recent form, {(1-recent_weight):.0%} full season")
 
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    # URLs for full season
-    skaters_full_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=oi&rate=n&team=ALL&pos=S&loc=B&toi=0&gpfilt=none&fd=&td=&tgp=410&lines=single&draftteam=ALL"
+    # URLs for full season (rate=y for per-60 stats)
+    skaters_full_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=none&fd=&td=&tgp=410&lines=single&draftteam=ALL"
     goalies_full_url = skaters_full_url.replace("&pos=S", "&pos=G").replace("stdoi=oi", "stdoi=g")
 
-    # URLs for last 10 games
-    skaters_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=oi&rate=n&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
-    goalies_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=g&rate=n&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
+    # URLs for last 10 games (rate=y for per-60 stats)
+    skaters_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
+    goalies_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=g&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
 
     # Download all datasets
     skaters_full = download_nst_stats(skaters_full_url, headers, "Full season skaters")
     goalies_full = download_nst_stats(goalies_full_url, headers, "Full season goalies")
     skaters_recent = download_nst_stats(skaters_recent_url, headers, "Last 10 games skaters")
     goalies_recent = download_nst_stats(goalies_recent_url, headers, "Last 10 games goalies")
+
+    # Add Position='G' to goalies (they don't have position column from NST)
+    if not goalies_full.empty:
+        goalies_full['Position'] = 'G'
+    if not goalies_recent.empty:
+        goalies_recent['Position'] = 'G'
 
     # Check if we got any data
     if skaters_full.empty and goalies_full.empty:
@@ -219,15 +233,17 @@ def download_nst_data(db_path, recent_weight=0.70):
 
 def view_team_rosters(db_path, min_toi=None):
     """
-    Display individual player stats organized by team.
-    
+    Display individual player stats organized by team with position groups.
+
     Args:
         db_path (str): Path to SQLite database
         min_toi (int, optional): Minimum TOI filter, defaults to MIN_TOI_MINUTES
     """
+    from team_strength import get_team_strength
+
     if min_toi is None:
         min_toi = MIN_TOI_MINUTES
-    
+
     try:
         conn = sqlite3.connect(db_path)
         df = pd.read_sql("SELECT * FROM players", conn)
@@ -235,51 +251,131 @@ def view_team_rosters(db_path, min_toi=None):
     except Exception as e:
         print(f"   ✗ Could not load player data: {e}")
         return
-    
+
     if df.empty:
         print("   No player data available")
         return
-    
-    print("\n" + "=" * 120)
-    print("PLAYER STATS BY TEAM (Weighted: 70% Recent Form, 30% Full Season)")
-    print("=" * 120)
-    
+
+    print("\n" + "=" * 140)
+    print("PLAYER STATS BY TEAM (70% xG + 30% Actual Goals, 60% Recent Form + 40% Full Season)")
+    print("=" * 140)
+
     # Group by team
     for team in sorted(df["Team"].unique()):
         team_players = df[df["Team"] == team].copy()
-        
+
         # Filter by TOI if column exists
         if "TOI" in team_players.columns:
             team_players = team_players[team_players["TOI"] > min_toi]
-        
+
         if team_players.empty:
             continue
-            
+
+        # Calculate team strength
+        team_offense, team_defense = get_team_strength(team, db_path)
+
         print(f"\n{team}")
-        print("-" * 120)
-        
-        # Select key columns to display
-        display_cols = ["Player"]
-        
-        # Add available stat columns in order of priority
-        priority_cols = ["GP", "TOI", "xGF", "xGA", "GAA"]
-        for col in priority_cols:
-            if col in team_players.columns:
-                display_cols.append(col)
-        
-        # Sort by xGF descending (most ice time first)
-        if "xGF" in team_players.columns:
-            team_players = team_players.sort_values("xGF", ascending=False)
-        
-        # Display the stats
-        display_df = team_players[display_cols].copy()
-        
-        # Format numeric columns to 2 decimal places
-        for col in display_df.columns:
-            if col != "Player" and pd.api.types.is_numeric_dtype(display_df[col]):
-                display_df[col] = display_df[col].round(2)
-        
-        print(display_df.to_string(index=False))
+        print("-" * 140)
+        print(f"TEAM STRENGTH (Position-Weighted):")
+        print(f"  Offensive Rating: {team_offense:.2f} xGF/60")
+        print(f"  Defensive Rating: {team_defense:.2f} xGA/60")
+        print()
+
+        # Split by position
+        forwards = team_players[team_players['Position'].isin(['C', 'L', 'R'])].copy() if 'Position' in team_players.columns else pd.DataFrame()
+        defensemen = team_players[team_players['Position'] == 'D'].copy() if 'Position' in team_players.columns else pd.DataFrame()
+        goalies = team_players[team_players['Position'] == 'G'].copy() if 'Position' in team_players.columns else pd.DataFrame()
+
+        # Calculate contributions if we have the required columns
+        if not team_players.empty and 'xGF/60' in team_players.columns and 'xGA/60' in team_players.columns and 'TOI' in team_players.columns:
+            from config import XG_WEIGHT, ACTUAL_GOALS_WEIGHT
+
+            total_toi = team_players['TOI'].sum()
+
+            # Calculate weighted values for ALL players first (for accurate team averages)
+            if 'GF/60' in team_players.columns and 'GA/60' in team_players.columns:
+                team_players['Weighted xGF/60'] = (team_players['xGF/60'] * XG_WEIGHT + team_players['GF/60'] * ACTUAL_GOALS_WEIGHT)
+                team_players['Weighted xGA/60'] = (team_players['xGA/60'] * XG_WEIGHT + team_players['GA/60'] * ACTUAL_GOALS_WEIGHT)
+
+            # Forwards
+            if not forwards.empty and 'GF/60' in forwards.columns and 'GA/60' in forwards.columns:
+                # Calculate weighted (blended) values
+                forwards['Weighted xGF/60'] = (forwards['xGF/60'] * XG_WEIGHT + forwards['GF/60'] * ACTUAL_GOALS_WEIGHT).round(2)
+                forwards['Weighted xGA/60'] = (forwards['xGA/60'] * XG_WEIGHT + forwards['GA/60'] * ACTUAL_GOALS_WEIGHT).round(2)
+
+                # Use weighted values for contribution calculations
+                forward_avg_weighted_xgf = forwards['Weighted xGF/60'].mean()
+                team_avg_weighted_xga = team_players['Weighted xGA/60'].mean()
+
+                forwards['Off_Contrib'] = ((forwards['Weighted xGF/60'] - forward_avg_weighted_xgf) * (forwards['TOI'] / total_toi) * 0.85).round(2)
+                forwards['Def_Contrib'] = ((team_avg_weighted_xga - forwards['Weighted xGA/60']) * (forwards['TOI'] / total_toi) * 0.20).round(2)
+                forwards = forwards.sort_values('Off_Contrib', ascending=False)
+
+            # Defensemen
+            if not defensemen.empty and 'GF/60' in defensemen.columns and 'GA/60' in defensemen.columns:
+                # Calculate weighted (blended) values
+                defensemen['Weighted xGF/60'] = (defensemen['xGF/60'] * XG_WEIGHT + defensemen['GF/60'] * ACTUAL_GOALS_WEIGHT).round(2)
+                defensemen['Weighted xGA/60'] = (defensemen['xGA/60'] * XG_WEIGHT + defensemen['GA/60'] * ACTUAL_GOALS_WEIGHT).round(2)
+
+                # Use weighted values for contribution calculations
+                defense_avg_weighted_xgf = defensemen['Weighted xGF/60'].mean()
+                team_avg_weighted_xga = team_players['Weighted xGA/60'].mean()
+
+                defensemen['Off_Contrib'] = ((defensemen['Weighted xGF/60'] - defense_avg_weighted_xgf) * (defensemen['TOI'] / total_toi) * 0.15).round(2)
+                defensemen['Def_Contrib'] = ((team_avg_weighted_xga - defensemen['Weighted xGA/60']) * (defensemen['TOI'] / total_toi) * 0.30).round(2)
+                defensemen = defensemen.sort_values('Def_Contrib', ascending=False)
+
+            # Goalies - use goalie-specific xG Against/60 stat
+            if not goalies.empty and 'xG Against/60' in goalies.columns and 'GAA' in goalies.columns:
+                # Calculate weighted (blended) value
+                goalies['Weighted xGA/60'] = (goalies['xG Against/60'] * XG_WEIGHT + goalies['GAA'] * ACTUAL_GOALS_WEIGHT).round(2)
+
+                # Use weighted values for contribution calculations
+                goalie_avg_weighted_xga = goalies['Weighted xGA/60'].mean()
+
+                goalies['Off_Contrib'] = 0.0
+                goalies['Def_Contrib'] = ((goalie_avg_weighted_xga - goalies['Weighted xGA/60']) * (goalies['TOI'] / total_toi) * 0.50).round(2)
+                goalies = goalies.sort_values('Def_Contrib', ascending=False)
+
+        # Display columns - need to check each position dataframe for available columns
+        # Include both expected (xG), actual (G), and weighted (blended) stats
+        base_cols = ['Player_ID', 'Player', 'Position', 'TOI', 'xGF/60', 'GF/60', 'xGA/60', 'GA/60', 'Weighted xGF/60', 'Weighted xGA/60']
+        contrib_cols = ['Off_Contrib', 'Def_Contrib']
+
+        # Display each position group
+        if not forwards.empty:
+            print("FORWARDS (sorted by offensive contribution)")
+            # Build display columns from what's available in forwards dataframe
+            forwards_display_cols = [c for c in base_cols + contrib_cols if c in forwards.columns]
+            forwards_display = forwards[forwards_display_cols].copy()
+            for col in forwards_display.columns:
+                if col not in ['Player_ID', 'Player', 'Position'] and pd.api.types.is_numeric_dtype(forwards_display[col]):
+                    forwards_display[col] = forwards_display[col].round(2)
+            print(forwards_display.to_string(index=False))
+            print()
+
+        if not defensemen.empty:
+            print("DEFENSEMEN (sorted by defensive contribution)")
+            # Build display columns from what's available in defensemen dataframe
+            defensemen_display_cols = [c for c in base_cols + contrib_cols if c in defensemen.columns]
+            defensemen_display = defensemen[defensemen_display_cols].copy()
+            for col in defensemen_display.columns:
+                if col not in ['Player_ID', 'Player', 'Position'] and pd.api.types.is_numeric_dtype(defensemen_display[col]):
+                    defensemen_display[col] = defensemen_display[col].round(2)
+            print(defensemen_display.to_string(index=False))
+            print()
+
+        if not goalies.empty:
+            print("GOALIES (sorted by defensive contribution)")
+            # For goalies, use their specific columns (xG Against/60, GAA, and weighted)
+            goalie_base_cols = ['Player_ID', 'Player', 'Position', 'TOI', 'xG Against/60', 'GAA', 'Weighted xGA/60']
+            goalies_display_cols = [c for c in goalie_base_cols + contrib_cols if c in goalies.columns]
+            goalies_display = goalies[goalies_display_cols].copy()
+            for col in goalies_display.columns:
+                if col not in ['Player_ID', 'Player', 'Position'] and pd.api.types.is_numeric_dtype(goalies_display[col]):
+                    goalies_display[col] = goalies_display[col].round(2)
+            print(goalies_display.to_string(index=False))
+            print()
         
         print()  # Extra line between teams
     

@@ -83,15 +83,24 @@ def simulate_playoffs(playoff_teams, final_standings, db_path):
     west.sort(key=lambda x: final_standings[final_standings.team == x].index[0])
 
     # ROUND 1 (8 teams -> 4 teams per conference)
-    if len(east) >= 2:
-        east_r1 = [best_of_7(east[i], east[i+1], home_first=True, db_path=db_path)
-                   for i in range(0, len(east), 2)]
+    # NHL format: 1v8, 2v7, 3v6, 4v5
+    if len(east) >= 8:
+        east_r1 = [
+            best_of_7(east[0], east[7], home_first=True, db_path=db_path),  # 1v8
+            best_of_7(east[1], east[6], home_first=True, db_path=db_path),  # 2v7
+            best_of_7(east[2], east[5], home_first=True, db_path=db_path),  # 3v6
+            best_of_7(east[3], east[4], home_first=True, db_path=db_path),  # 4v5
+        ]
         results['round1'].extend(east_r1)
         east = east_r1
-    
-    if len(west) >= 2:
-        west_r1 = [best_of_7(west[i], west[i+1], home_first=True, db_path=db_path)
-                   for i in range(0, len(west), 2)]
+
+    if len(west) >= 8:
+        west_r1 = [
+            best_of_7(west[0], west[7], home_first=True, db_path=db_path),  # 1v8
+            best_of_7(west[1], west[6], home_first=True, db_path=db_path),  # 2v7
+            best_of_7(west[2], west[5], home_first=True, db_path=db_path),  # 3v6
+            best_of_7(west[3], west[4], home_first=True, db_path=db_path),  # 4v5
+        ]
         results['round1'].extend(west_r1)
         west = west_r1
 

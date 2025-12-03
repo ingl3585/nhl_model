@@ -29,8 +29,8 @@ def simulate_game(home, away, db_path):
         ao *= np.random.uniform(1 - TEAM_STRENGTH_VARIANCE, 1 + TEAM_STRENGTH_VARIANCE)
         ad *= np.random.uniform(1 - TEAM_STRENGTH_VARIANCE, 1 + TEAM_STRENGTH_VARIANCE)
 
-    home_xg = ho * HOME_ICE_ADVANTAGE * (LEAGUE_AVG_XG_PER_60 / ad)
-    away_xg = ao * (LEAGUE_AVG_XG_PER_60 / hd)
+    home_xg = ho * HOME_ICE_ADVANTAGE * (ad / LEAGUE_AVG_XG_PER_60)
+    away_xg = ao * (hd / LEAGUE_AVG_XG_PER_60)
 
     hg = np.random.poisson(home_xg)
     ag = np.random.poisson(away_xg)
