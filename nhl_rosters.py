@@ -23,7 +23,8 @@ TEAM_MAP = {
     "SJS": "San Jose Sharks", "S.J": "San Jose Sharks",
     "SEA": "Seattle Kraken", "STL": "St. Louis Blues",
     "TBL": "Tampa Bay Lightning", "T.B": "Tampa Bay Lightning",
-    "TOR": "Toronto Maple Leafs", "UTA": "Utah Mammoth",
+    "TOR": "Toronto Maple Leafs",
+    "UTA": "Utah Mammoth",
     "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights",
     "WSH": "Washington Capitals", "WPG": "Winnipeg Jets"
 }
@@ -45,9 +46,15 @@ def clean_team_name(team_str):
     if pd.isna(team_str):
         return np.nan
 
-    parts = [p.strip().replace('.', '') for p in str(team_str).replace('/', ',').split(',')]
+    # Split by comma or slash for traded players, keep dots for NST abbreviations
+    parts = [p.strip() for p in str(team_str).replace('/', ',').split(',')]
     parts = [p for p in parts if p]
-    return TEAM_MAP.get(parts[-1].upper(), team_str) if parts else team_str
+
+    # Use the last team (current team for traded players)
+    last_team = parts[-1].upper() if parts else team_str
+
+    # Look up in TEAM_MAP (handles both "LAK", "L.A", etc.)
+    return TEAM_MAP.get(last_team, team_str)
 
 
 def download_nst_stats(url, headers, dataset_name):
@@ -174,6 +181,7 @@ def merge_and_weight_stats(full_df, recent_df, recent_weight=0.70):
 def download_nst_data(db_path, recent_weight=None):
     """
     Download live player stats from Natural Stat Trick with recent form weighting.
+    Filters rosters to only include skaters who played in their team's last game (injury/trade filtering).
 
     Args:
         db_path (str): Path to SQLite database file
@@ -190,19 +198,23 @@ def download_nst_data(db_path, recent_weight=None):
 
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    # URLs for full season (rate=y for per-60 stats)
-    skaters_full_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=none&fd=&td=&tgp=410&lines=single&draftteam=ALL"
+    # URLs for full season (rate=y for per-60 stats, sit=all for all situations)
+    skaters_full_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=none&fd=&td=&tgp=410&lines=single&draftteam=ALL"
     goalies_full_url = skaters_full_url.replace("&pos=S", "&pos=G").replace("stdoi=oi", "stdoi=g")
 
-    # URLs for last 10 games (rate=y for per-60 stats)
-    skaters_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
-    goalies_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=5v5&score=all&stdoi=g&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
+    # URLs for last 10 games (rate=y for per-60 stats, sit=all for all situations)
+    skaters_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
+    goalies_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=g&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
+
+    # URL for last game rosters (gp=1) - identifies active roster (injuries/trades)
+    skaters_last_game_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=1&lines=single&draftteam=ALL"
 
     # Download all datasets
     skaters_full = download_nst_stats(skaters_full_url, headers, "Full season skaters")
     goalies_full = download_nst_stats(goalies_full_url, headers, "Full season goalies")
     skaters_recent = download_nst_stats(skaters_recent_url, headers, "Last 10 games skaters")
     goalies_recent = download_nst_stats(goalies_recent_url, headers, "Last 10 games goalies")
+    skaters_last_game = download_nst_stats(skaters_last_game_url, headers, "Last game rosters (injury/trade filter)")
 
     # Add Position='G' to goalies (they don't have position column from NST)
     if not goalies_full.empty:
@@ -215,6 +227,54 @@ def download_nst_data(db_path, recent_weight=None):
         print("   ⚠ NST download failed completely → using league averages")
         return pd.DataFrame()
 
+    # Use last game roster as the source of truth for current team assignments
+    active_player_ids = set()
+    if not skaters_last_game.empty and not skaters_full.empty:
+        # Filter last game roster to only meaningful ice time (>5 min in that game)
+        # Note: TOI in last game data is for THAT GAME ONLY, not full season
+        if "TOI" in skaters_last_game.columns:
+            skaters_last_game_filtered = skaters_last_game[skaters_last_game["TOI"] > 5].copy()
+            print(f"   → Last game roster: {len(skaters_last_game_filtered)} skaters with >5min ice time in last game (from {len(skaters_last_game)} total)")
+        else:
+            skaters_last_game_filtered = skaters_last_game.copy()
+            print(f"   ⚠ No TOI column in last game data - using all {len(skaters_last_game_filtered)} players")
+
+        # Clean team names for last game data (this is the CURRENT team)
+        skaters_last_game_filtered["Team"] = skaters_last_game_filtered["Team"].apply(clean_team_name)
+
+        # For traded players: update their team in full-season data to match last game
+        # Match by Player name (more reliable than Player_ID for traded players)
+        if "Player" in skaters_last_game_filtered.columns and "Player" in skaters_full.columns:
+            # Create mapping of Player name -> current team from last game
+            current_team_map = dict(zip(skaters_last_game_filtered["Player"], skaters_last_game_filtered["Team"]))
+
+            # Update full-season data: if player is in last game, use their current team
+            def update_team(row):
+                if row["Player"] in current_team_map:
+                    return current_team_map[row["Player"]]
+                else:
+                    return clean_team_name(row["Team"])
+
+            skaters_full["Team"] = skaters_full.apply(update_team, axis=1)
+
+            # Do the same for recent stats
+            if not skaters_recent.empty and "Player" in skaters_recent.columns:
+                skaters_recent["Team"] = skaters_recent.apply(update_team, axis=1)
+
+            print(f"   ✓ Updated team assignments for traded players based on last game roster")
+
+        # Filter to only include players from last game roster
+        active_player_names = set(skaters_last_game_filtered["Player"])
+        skaters_full = skaters_full[skaters_full["Player"].isin(active_player_names)].copy()
+        if not skaters_recent.empty:
+            skaters_recent = skaters_recent[skaters_recent["Player"].isin(active_player_names)].copy()
+
+        # Track active player IDs for MIN_TOI bypass
+        active_player_ids = set(skaters_full["Player_ID"])
+        print(f"   ✓ Filtered to {len(skaters_full)} active roster players from last game")
+    else:
+        print("   ⚠ Could not identify last game roster - using all players")
+
     # Merge and weight stats
     print("   Merging and weighting stats...")
     skaters_weighted = merge_and_weight_stats(skaters_full, skaters_recent, recent_weight)
@@ -226,6 +286,15 @@ def download_nst_data(db_path, recent_weight=None):
     if not all_players.empty:
         conn = sqlite3.connect(db_path)
         all_players.to_sql("players", conn, if_exists="replace", index=False)
+
+        # Store active player IDs (from last game) in a separate table to bypass MIN_TOI filter
+        if not skaters_last_game.empty and "TOI" in skaters_last_game.columns:
+            active_ids_df = pd.DataFrame({
+                "Player_ID": list(active_player_ids)
+            })
+            active_ids_df.to_sql("active_roster", conn, if_exists="replace", index=False)
+            print(f"   ✓ Saved {len(active_player_ids)} active roster players (bypass MIN_TOI filter)")
+
         conn.close()
         print(f"   ✓ Success: {len(all_players)} weighted players saved to {db_path}")
 
@@ -247,6 +316,17 @@ def view_team_rosters(db_path, min_toi=None):
     try:
         conn = sqlite3.connect(db_path)
         df = pd.read_sql("SELECT * FROM players", conn)
+
+        # Check if active_roster table exists
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='active_roster'")
+        has_active_roster = cursor.fetchone() is not None
+
+        active_ids = set()
+        if has_active_roster:
+            active_df = pd.read_sql("SELECT Player_ID FROM active_roster", conn)
+            active_ids = set(active_df["Player_ID"])
+
         conn.close()
     except Exception as e:
         print(f"   ✗ Could not load player data: {e}")
@@ -264,9 +344,15 @@ def view_team_rosters(db_path, min_toi=None):
     for team in sorted(df["Team"].unique()):
         team_players = df[df["Team"] == team].copy()
 
-        # Filter by TOI if column exists
+        # Filter by TOI if column exists, BUT keep active roster players regardless
         if "TOI" in team_players.columns:
-            team_players = team_players[team_players["TOI"] > min_toi]
+            if has_active_roster:
+                # Keep players with sufficient TOI OR in active roster
+                team_players = team_players[
+                    (team_players["TOI"] > min_toi) | (team_players["Player_ID"].isin(active_ids))
+                ]
+            else:
+                team_players = team_players[team_players["TOI"] > min_toi]
 
         if team_players.empty:
             continue

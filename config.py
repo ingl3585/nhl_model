@@ -24,12 +24,12 @@ PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 # =============================================================================
 # SIMULATION SETTINGS
 # =============================================================================
-N_SIMS_FULL = 1                       # Full season simulations
-N_SIMS_TODAY = 25000                     # Simulations per today's game
+N_SIMS_FULL = 100                      # Full season simulations
+N_SIMS_TODAY = 100                     # Simulations per today's game
 HOME_ICE_ADVANTAGE = 1.10
-LEAGUE_AVG_XG_PER_60 = 2.95
+LEAGUE_AVG_XG_PER_60 = 3.10            # All-situations league average (updated from 2.95 for 5v5)
 OT_HOME_WIN_PROB = 0.55                # Historical: ~55% of OT/SO won by home team
-TEAM_STRENGTH_VARIANCE = 0.15          # ±9% game-to-game variance (injuries, form, etc.)
+TEAM_STRENGTH_VARIANCE = 0.15          # ±15% game-to-game variance (injuries, form, etc.)
 
 # Position weights for team strength calculations (must sum to 1.0)
 FORWARD_OFFENSE_WEIGHT = 0.85          # Forwards drive 85% of offense
@@ -63,7 +63,7 @@ XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
 # DISPLAY SETTINGS
 # =============================================================================
 SHOW_TODAYS_GAMES = True
-SHOW_ROSTER_DUMP = True               # Set True if you want full roster print
+SHOW_ROSTER_DUMP = False               # Set True if you want full roster print
 SHOW_PROGRESS_EVERY = 2000             # Print progress every N sims
 
 # =============================================================================

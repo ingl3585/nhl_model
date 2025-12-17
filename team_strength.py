@@ -28,51 +28,99 @@ def get_team_strength(team, db_path):
     except:
         return FALLBACK_OFFENSIVE_RATING, FALLBACK_DEFENSIVE_RATING
 
+    # Check if active_roster table exists (players from last game bypass MIN_TOI)
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='active_roster'")
+    has_active_roster = cursor.fetchone() is not None
+
     # Position-weighted queries with xG and actual goals blending
     # Calculate separate averages for each position (both expected and actual)
     # Then blend: 70% xG + 30% actual goals
     # Offense: Forwards 85%, Defense 15%, Goalies 0%
     # Defense: Forwards 20%, Defense 30%, Goalies 50%
 
-    query = '''
-        SELECT
-            -- Forward offense (xGF/60)
-            COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "xGF/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_xgf,
-            -- Forward offense (actual GF/60)
-            COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "GF/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_gf,
+    if has_active_roster:
+        # Include players from last game OR players with sufficient TOI
+        query = '''
+            SELECT
+                -- Forward offense (xGF/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "xGF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_xgf,
+                -- Forward offense (actual GF/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "GF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_gf,
 
-            -- Defense offense (xGF/60)
-            COALESCE(SUM(CASE WHEN Position = 'D' THEN "xGF/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_xgf,
-            -- Defense offense (actual GF/60)
-            COALESCE(SUM(CASE WHEN Position = 'D' THEN "GF/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_gf,
+                -- Defense offense (xGF/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "xGF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_xgf,
+                -- Defense offense (actual GF/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "GF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_gf,
 
-            -- Forward defense (xGA/60)
-            COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "xGA/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_xga,
-            -- Forward defense (actual GA/60)
-            COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "GA/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_ga,
+                -- Forward defense (xGA/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "xGA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_xga,
+                -- Forward defense (actual GA/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "GA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_ga,
 
-            -- Defense defense (xGA/60)
-            COALESCE(SUM(CASE WHEN Position = 'D' THEN "xGA/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_xga,
-            -- Defense defense (actual GA/60)
-            COALESCE(SUM(CASE WHEN Position = 'D' THEN "GA/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_ga,
+                -- Defense defense (xGA/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "xGA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_xga,
+                -- Defense defense (actual GA/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "GA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_ga,
 
-            -- Goalie defense (xG Against/60)
-            COALESCE(SUM(CASE WHEN Position = 'G' THEN "xG Against/60" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position = 'G' THEN "TOI" END), 0) as goalie_xga,
-            -- Goalie defense (actual GAA)
-            COALESCE(SUM(CASE WHEN Position = 'G' THEN "GAA" * "TOI" END), 0) /
-            NULLIF(SUM(CASE WHEN Position = 'G' THEN "TOI" END), 0) as goalie_gaa
-        FROM players
-        WHERE Team = ? AND "TOI" > ?
-    '''
+                -- Goalie defense (xG Against/60)
+                COALESCE(SUM(CASE WHEN Position = 'G' THEN "xG Against/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'G' THEN "TOI" END), 0) as goalie_xga,
+                -- Goalie defense (actual GAA)
+                COALESCE(SUM(CASE WHEN Position = 'G' THEN "GAA" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'G' THEN "TOI" END), 0) as goalie_gaa
+            FROM players
+            WHERE Team = ?
+              AND (Player_ID IN (SELECT Player_ID FROM active_roster) OR "TOI" > ?)
+        '''
+    else:
+        # Fallback to original MIN_TOI filter
+        query = '''
+            SELECT
+                -- Forward offense (xGF/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "xGF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_xgf,
+                -- Forward offense (actual GF/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "GF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_gf,
+
+                -- Defense offense (xGF/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "xGF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_xgf,
+                -- Defense offense (actual GF/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "GF/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_gf,
+
+                -- Forward defense (xGA/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "xGA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_xga,
+                -- Forward defense (actual GA/60)
+                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "GA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "TOI" END), 0) as forward_ga,
+
+                -- Defense defense (xGA/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "xGA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_xga,
+                -- Defense defense (actual GA/60)
+                COALESCE(SUM(CASE WHEN Position = 'D' THEN "GA/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'D' THEN "TOI" END), 0) as defense_ga,
+
+                -- Goalie defense (xG Against/60)
+                COALESCE(SUM(CASE WHEN Position = 'G' THEN "xG Against/60" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'G' THEN "TOI" END), 0) as goalie_xga,
+                -- Goalie defense (actual GAA)
+                COALESCE(SUM(CASE WHEN Position = 'G' THEN "GAA" * "TOI" END), 0) /
+                NULLIF(SUM(CASE WHEN Position = 'G' THEN "TOI" END), 0) as goalie_gaa
+            FROM players
+            WHERE Team = ? AND "TOI" > ?
+        '''
 
     try:
         df = pd.read_sql(query, conn, params=(team, MIN_TOI_MINUTES))
