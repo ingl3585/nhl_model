@@ -114,6 +114,10 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
     cup_counter = Counter()
     pres_counter = Counter()
 
+    # Track playoff seedings and matchups
+    seeding_counter = Counter()  # Track (conference, seed, team) tuples
+    matchup_counter = Counter()  # Track Round 1 matchups
+
     print(f"\nRunning {n_sims:,} full-season simulations on {len(remaining_games)} games...")
 
     for sim in tqdm(range(n_sims), desc="Season simulations", unit="sim"):
@@ -122,16 +126,17 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
         # Simulate remaining games
         for _, game in remaining_games.iterrows():
             home, away = game.home, game.visitor
-            winner, hpts, apts, hgf, agf, reg = simulate_game(home, away, db_path)
+            winner, hpts, apts, hgf, agf, win_type = simulate_game(home, away, db_path)
 
             h_idx = standings[standings.team == home].index[0]
             a_idx = standings[standings.team == away].index[0]
 
             standings.loc[h_idx, ["points", "gf", "ga"]] += [hpts, hgf, agf]
             standings.loc[a_idx, ["points", "gf", "ga"]] += [apts, agf, hgf]
-            if hpts == 2:  # ROW includes all 2-pt wins (regulation + OT/SO)
+            # ROW = Regulation + Overtime Wins (excludes shootouts)
+            if hpts == 2 and win_type != 'SO':
                 standings.loc[h_idx, "row"] += 1
-            if apts == 2:  # ROW includes all 2-pt wins
+            if apts == 2 and win_type != 'SO':
                 standings.loc[a_idx, "row"] += 1
 
         standings["gf-ga"] = standings["gf"] - standings["ga"]
@@ -147,6 +152,133 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
         playoff_teams = get_playoff_teams(final)
         for t in playoff_teams:
             playoff_counter[t] += 1
+
+        # Track seedings and matchups using proper NHL divisional format
+        # EASTERN CONFERENCE
+        atlantic_playoff = [t for t in playoff_teams if t in DIVISIONS["Atlantic"]]
+        metro_playoff = [t for t in playoff_teams if t in DIVISIONS["Metropolitan"]]
+
+        # Sort each division by standings
+        atlantic_sorted = final[final.team.isin(atlantic_playoff)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+        metro_sorted = final[final.team.isin(metro_playoff)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+
+        # Determine division winners and their points
+        atlantic_winner = atlantic_sorted[0] if atlantic_sorted else None
+        metro_winner = metro_sorted[0] if metro_sorted else None
+
+        atlantic_winner_pts = final[final.team == atlantic_winner].iloc[0]["points"] if atlantic_winner else 0
+        metro_winner_pts = final[final.team == metro_winner].iloc[0]["points"] if metro_winner else 0
+
+        # Identify wildcards (teams in playoff but not top 3 in their division)
+        atlantic_top3 = atlantic_sorted[:3]
+        metro_top3 = metro_sorted[:3]
+        east_wildcards = [t for t in playoff_teams
+                         if t in DIVISIONS["Atlantic"] + DIVISIONS["Metropolitan"]
+                         and t not in atlantic_top3 and t not in metro_top3]
+
+        # Sort wildcards by points
+        east_wc_sorted = final[final.team.isin(east_wildcards)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+
+        # Build proper seeding: Higher-points division winner gets seed 1
+        if atlantic_winner_pts >= metro_winner_pts:
+            div1_teams = atlantic_sorted[:3]  # A1, A2, A3
+            div2_teams = metro_sorted[:3]     # B1, B2, B3
+        else:
+            div1_teams = metro_sorted[:3]
+            div2_teams = atlantic_sorted[:3]
+
+        # Assign wildcards: WC1 goes to Div2 winner, WC2 goes to Div1 winner
+        wc1 = east_wc_sorted[0] if len(east_wc_sorted) > 0 else None
+        wc2 = east_wc_sorted[1] if len(east_wc_sorted) > 1 else None
+
+        # East seeds: 1=Div1 winner, 2=Div2 winner, 3=Div1 2nd, 4=Div1 3rd,
+        #             5=Div2 2nd, 6=Div2 3rd, 7=WC1, 8=WC2
+        east_seeds = []
+        if len(div1_teams) >= 1: east_seeds.append(div1_teams[0])  # Seed 1
+        if len(div2_teams) >= 1: east_seeds.append(div2_teams[0])  # Seed 2
+        if len(div1_teams) >= 2: east_seeds.append(div1_teams[1])  # Seed 3
+        if len(div1_teams) >= 3: east_seeds.append(div1_teams[2])  # Seed 4
+        if len(div2_teams) >= 2: east_seeds.append(div2_teams[1])  # Seed 5
+        if len(div2_teams) >= 3: east_seeds.append(div2_teams[2])  # Seed 6
+        if wc1: east_seeds.append(wc1)  # Seed 7 (WC1)
+        if wc2: east_seeds.append(wc2)  # Seed 8 (WC2)
+
+        # Record Eastern seedings
+        for seed, team in enumerate(east_seeds, 1):
+            seeding_counter[("Eastern", seed, team)] += 1
+
+        # Record Eastern Round 1 matchups (divisional format)
+        # Div1: Seed 1 vs WC2 (seed 8), Seed 3 vs Seed 4
+        # Div2: Seed 2 vs WC1 (seed 7), Seed 5 vs Seed 6
+        if len(east_seeds) >= 8:
+            matchup_counter[("Eastern", 1, east_seeds[0], 8, east_seeds[7])] += 1  # 1 vs WC2
+            matchup_counter[("Eastern", 3, east_seeds[2], 4, east_seeds[3])] += 1  # Div1: 2nd vs 3rd
+            matchup_counter[("Eastern", 2, east_seeds[1], 7, east_seeds[6])] += 1  # 2 vs WC1
+            matchup_counter[("Eastern", 5, east_seeds[4], 6, east_seeds[5])] += 1  # Div2: 2nd vs 3rd
+
+        # WESTERN CONFERENCE
+        central_playoff = [t for t in playoff_teams if t in DIVISIONS["Central"]]
+        pacific_playoff = [t for t in playoff_teams if t in DIVISIONS["Pacific"]]
+
+        central_sorted = final[final.team.isin(central_playoff)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+        pacific_sorted = final[final.team.isin(pacific_playoff)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+
+        central_winner = central_sorted[0] if central_sorted else None
+        pacific_winner = pacific_sorted[0] if pacific_sorted else None
+
+        central_winner_pts = final[final.team == central_winner].iloc[0]["points"] if central_winner else 0
+        pacific_winner_pts = final[final.team == pacific_winner].iloc[0]["points"] if pacific_winner else 0
+
+        central_top3 = central_sorted[:3]
+        pacific_top3 = pacific_sorted[:3]
+        west_wildcards = [t for t in playoff_teams
+                         if t in DIVISIONS["Central"] + DIVISIONS["Pacific"]
+                         and t not in central_top3 and t not in pacific_top3]
+
+        west_wc_sorted = final[final.team.isin(west_wildcards)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+
+        if central_winner_pts >= pacific_winner_pts:
+            div1_teams = central_sorted[:3]
+            div2_teams = pacific_sorted[:3]
+        else:
+            div1_teams = pacific_sorted[:3]
+            div2_teams = central_sorted[:3]
+
+        wc1 = west_wc_sorted[0] if len(west_wc_sorted) > 0 else None
+        wc2 = west_wc_sorted[1] if len(west_wc_sorted) > 1 else None
+
+        west_seeds = []
+        if len(div1_teams) >= 1: west_seeds.append(div1_teams[0])
+        if len(div2_teams) >= 1: west_seeds.append(div2_teams[0])
+        if len(div1_teams) >= 2: west_seeds.append(div1_teams[1])
+        if len(div1_teams) >= 3: west_seeds.append(div1_teams[2])
+        if len(div2_teams) >= 2: west_seeds.append(div2_teams[1])
+        if len(div2_teams) >= 3: west_seeds.append(div2_teams[2])
+        if wc1: west_seeds.append(wc1)
+        if wc2: west_seeds.append(wc2)
+
+        # Record Western seedings
+        for seed, team in enumerate(west_seeds, 1):
+            seeding_counter[("Western", seed, team)] += 1
+
+        # Record Western Round 1 matchups (divisional format)
+        if len(west_seeds) >= 8:
+            matchup_counter[("Western", 1, west_seeds[0], 8, west_seeds[7])] += 1
+            matchup_counter[("Western", 3, west_seeds[2], 4, west_seeds[3])] += 1
+            matchup_counter[("Western", 2, west_seeds[1], 7, west_seeds[6])] += 1
+            matchup_counter[("Western", 5, west_seeds[4], 6, west_seeds[5])] += 1
 
         # Simulate playoffs and track each round
         playoff_results = simulate_playoffs(playoff_teams, final, db_path)
@@ -164,4 +296,116 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
         if playoff_results['cup_winner']:
             cup_counter[playoff_results['cup_winner']] += 1
 
-    return playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter
+    return playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter, seeding_counter, matchup_counter
+
+
+def display_playoff_matchups(seeding_counter, matchup_counter, n_sims, min_probability=0.05):
+    """
+    Display most likely playoff seedings and Round 1 matchups.
+
+    Args:
+        seeding_counter (Counter): Counter of (conference, seed, team) tuples
+        matchup_counter (Counter): Counter of Round 1 matchup tuples
+        n_sims (int): Total number of simulations
+        min_probability (float): Minimum probability to display (default 10%)
+    """
+    print("\n" + "=" * 80)
+    print("MOST LIKELY PLAYOFF SEEDINGS")
+    print("=" * 80)
+
+    # Group seedings by conference
+    for conf in ["Eastern", "Western"]:
+        print(f"\n{conf} Conference:")
+        print("-" * 80)
+
+        for seed in range(1, 9):
+            # Get all teams that achieved this seed in this conference
+            seed_teams = [(team, count) for (c, s, team), count in seeding_counter.items()
+                         if c == conf and s == seed]
+
+            if seed_teams:
+                # Sort by frequency
+                seed_teams.sort(key=lambda x: x[1], reverse=True)
+
+                print(f"\n  Seed #{seed}:")
+                for team, count in seed_teams[:5]:  # Show top 5 most likely
+                    prob = count / n_sims
+                    if prob >= min_probability:
+                        print(f"    {team:30s} {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+
+    print("\n" + "=" * 80)
+    print("MOST LIKELY ROUND 1 MATCHUPS")
+    print("=" * 80)
+
+    # Group matchups by conference and series
+    for conf in ["Eastern", "Western"]:
+        print(f"\n{conf} Conference:")
+        print("-" * 80)
+
+        # Group by series type (divisional format: 1v8, 3v4, 2v7, 5v6)
+        # Div1: 1vWC2, 3v4  |  Div2: 2vWC1, 5v6
+        for series_seeds in [(1, 8), (3, 4), (2, 7), (5, 6)]:
+            seed1, seed2 = series_seeds
+
+            # Get all matchups for this series
+            series_matchups = [(key, count) for key, count in matchup_counter.items()
+                              if key[0] == conf and key[1] == seed1 and key[3] == seed2]
+
+            if not series_matchups:
+                continue
+
+            series_matchups.sort(key=lambda x: x[1], reverse=True)
+
+            # Show top 5 for each series
+            print(f"\n  ({seed1}) vs ({seed2}):")
+            displayed = 0
+            for matchup, count in series_matchups[:10]:
+                _, s1, team1, s2, team2 = matchup
+                prob = count / n_sims
+                if prob >= min_probability or displayed < 3:  # Show at least top 3
+                    print(f"    {team1:28s} vs {team2:28s}  {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+                    displayed += 1
+                    if displayed >= 5:  # Cap at 5 per series
+                        break
+
+    print("\n" + "=" * 80)
+    print("MOST LIKELY ROUND 1 BRACKET")
+    print("=" * 80)
+    print("(Based on most common seeding for each team)")
+    print("=" * 80)
+
+    # For each conference, build bracket from most common seeds
+    for conf in ["Eastern", "Western"]:
+        print(f"\n{conf} Conference:")
+        print("-" * 80)
+
+        # Get all seedings for this conference and sort by frequency
+        conf_seedings = [(seed, team, count) for (c, seed, team), count in seeding_counter.items() if c == conf]
+        conf_seedings.sort(key=lambda x: x[2], reverse=True)
+
+        # Greedily assign teams to seeds (most frequent first)
+        bracket = {}
+        used_teams = set()
+
+        for seed, team, count in conf_seedings:
+            # If this seed is empty and this team hasn't been assigned yet
+            if seed not in bracket and team not in used_teams:
+                bracket[seed] = team
+                used_teams.add(team)
+
+                # Stop once we have all 8 seeds filled
+                if len(bracket) == 8:
+                    break
+
+        # Display the bracket matchups (divisional format)
+        if len(bracket) >= 8:
+            print(f"  Division 1 (Higher seed):")
+            print(f"    (1) {bracket[1]:26s} vs (WC2) {bracket[8]:26s}")
+            print(f"    (3) {bracket[3]:26s} vs (4)   {bracket[4]:26s}")
+            print(f"  Division 2 (Lower seed):")
+            print(f"    (2) {bracket[2]:26s} vs (WC1) {bracket[7]:26s}")
+            print(f"    (5) {bracket[5]:26s} vs (6)   {bracket[6]:26s}")
+        else:
+            print(f"  [Not enough data to construct full bracket - only {len(bracket)} seeds]")
+
+    print("\n" + "=" * 80)

@@ -7,7 +7,7 @@ from config import *
 from nhl_schedule import scrape_schedule, get_todays_games
 from nhl_rosters import download_nst_data
 from game_simulation import predict_todays_games
-from season_simulation import build_current_standings, simulate_full_season
+from season_simulation import build_current_standings, simulate_full_season, display_playoff_matchups
 
 # Header
 print("=" * 100)
@@ -47,7 +47,7 @@ if SHOW_TODAYS_GAMES:
 
 # Step 5: Full season Monte Carlo simulations
 start_time = time.time()
-playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter = simulate_full_season(
+playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter, seeding_counter, matchup_counter = simulate_full_season(
     schedule,
     current_standings,
     N_SIMS_FULL,
@@ -68,10 +68,18 @@ for team in all_teams:
         "Conf Finals %": f"{round2_counter[team]/N_SIMS_FULL:.1%}",
         "Finals %": f"{conf_finals_counter[team]/N_SIMS_FULL:.1%}",
         "Stanley Cup %": f"{cup_counter[team]/N_SIMS_FULL:.1%}",
-        "President's Trophy %": f"{pres_counter[team]/N_SIMS_FULL:.1%}"
+        "President's Trophy %": f"{pres_counter[team]/N_SIMS_FULL:.1%}",
+        "_cup": cup_counter[team]/N_SIMS_FULL,
+        "_playoff": playoff_counter[team]/N_SIMS_FULL
     })
 
-final_df = pd.DataFrame(results).sort_values("Playoff %", ascending=False)
+final_df = pd.DataFrame(results).sort_values(
+    ["_playoff", "_cup"],
+    ascending=False
+).drop(columns=["_cup", "_playoff"])
+
+# Display playoff seedings and matchups
+display_playoff_matchups(seeding_counter, matchup_counter, N_SIMS_FULL)
 
 print("\n" + "=" * 120)
 print(f"NHL {CURRENT_SEASON_FULL} FINAL RESULTS — {N_SIMS_FULL:,} sims in {elapsed:.0f}s".center(120))
