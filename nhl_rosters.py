@@ -7,7 +7,10 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 from io import StringIO
-from config import TEAM_ABBREV_FIXES, MIN_TOI_MINUTES, RECENT_FORM_WEIGHT, SHOW_ROSTER_DUMP
+from config import (
+    TEAM_ABBREV_FIXES, MIN_TOI_MINUTES, RECENT_FORM_WEIGHT,
+    FULL_SEASON_WEIGHT, LAST_YEAR_WEIGHT, SHOW_ROSTER_DUMP
+)
 
 # Team mappings (consistent with schedule module)
 TEAM_MAP = {
@@ -91,43 +94,84 @@ def download_nst_stats(url, headers, dataset_name):
         return pd.DataFrame()
 
 
-def merge_and_weight_stats(full_df, recent_df, recent_weight=0.70):
+def merge_and_weight_stats(full_df, recent_df, last_year_df=None,
+                          recent_weight=0.55, full_weight=0.30, last_year_weight=0.15):
     """
-    Merge full-season and recent stats with weighted averaging.
+    Merge current season (full + recent) and last year's stats with three-way weighted averaging.
 
     Args:
-        full_df (pd.DataFrame): Full season stats
-        recent_df (pd.DataFrame): Last 10 games stats
-        recent_weight (float): Weight for recent stats (0-1), default 0.70
+        full_df (pd.DataFrame): Current season full stats
+        recent_df (pd.DataFrame): Current season last 10 games stats
+        last_year_df (pd.DataFrame): Last year's full season stats (optional)
+        recent_weight (float): Weight for recent stats (default 0.55)
+        full_weight (float): Weight for current full season (default 0.30)
+        last_year_weight (float): Weight for last year (default 0.15)
 
     Returns:
         pd.DataFrame: Weighted player stats
     """
     if full_df.empty:
         return full_df
-    if recent_df.empty:
-        print("   ⚠ No recent stats available, using full season only")
+
+    # Handle missing datasets
+    has_recent = not recent_df.empty if recent_df is not None else False
+    has_last_year = not last_year_df.empty if last_year_df is not None else False
+
+    if not has_recent and not has_last_year:
+        print("   ⚠ No recent or last year stats available, using full season only")
         return full_df
 
-    full_weight = 1 - recent_weight
+    # Normalize weights if datasets are missing
+    if not has_recent:
+        print("   ⚠ No recent stats available, redistributing weight")
+        full_weight = full_weight / (full_weight + last_year_weight) if has_last_year else 1.0
+        last_year_weight = 1.0 - full_weight if has_last_year else 0.0
+        recent_weight = 0.0
+    elif not has_last_year:
+        print("   ⚠ No last year stats available, redistributing weight")
+        full_weight = full_weight / (full_weight + recent_weight)
+        recent_weight = 1.0 - full_weight
+        last_year_weight = 0.0
 
-    # Clean team names for both datasets
+    # Clean team names for all datasets
     full_df = full_df.copy()
-    recent_df = recent_df.copy()
     full_df["Team"] = full_df["Team"].apply(clean_team_name)
-    recent_df["Team"] = recent_df["Team"].apply(clean_team_name)
 
-    # Merge on Player_ID + Team (unique identification)
-    merged = full_df.merge(
-        recent_df,
-        on=["Player_ID", "Team"],
-        how="left",
-        suffixes=("_full", "_recent")
-    )
+    if has_recent:
+        recent_df = recent_df.copy()
+        recent_df["Team"] = recent_df["Team"].apply(clean_team_name)
+
+    if has_last_year:
+        last_year_df = last_year_df.copy()
+        last_year_df["Team"] = last_year_df["Team"].apply(clean_team_name)
+
+    # Start with full season as base
+    merged = full_df.copy()
+
+    # Merge recent stats if available
+    if has_recent:
+        merged = merged.merge(
+            recent_df,
+            on=["Player_ID", "Team"],
+            how="left",
+            suffixes=("_full", "_recent")
+        )
+
+    # Merge last year stats if available (match on Player_ID only, not Team - players may have changed teams)
+    if has_last_year:
+        # Only keep Player_ID and stat columns from last year (not Team, since players may have moved)
+        last_year_merge_cols = ["Player_ID"] + [c for c in last_year_df.columns
+                                                  if c not in ["Player_ID", "Team", "Player", "Position", "GP", "Games Played"]]
+        merged = merged.merge(
+            last_year_df[last_year_merge_cols],
+            on="Player_ID",
+            how="left",
+            suffixes=("", "_lastyear")
+        )
 
     # Identify columns to keep as-is (non-numeric or special columns)
     keep_as_is = ["Player_ID", "Player", "Team", "Position", "GP", "Games Played"]
-    
+
     # Identify numeric columns to weight
     stats_to_weight = []
     for col in full_df.columns:
@@ -143,7 +187,13 @@ def merge_and_weight_stats(full_df, recent_df, recent_weight=0.70):
     # Build weighted dataframe
     weighted = pd.DataFrame()
     weighted["Player_ID"] = merged["Player_ID"]
-    weighted["Player"] = merged.get("Player_full", merged.get("Player"))
+
+    # Handle Player column (might have _full suffix if recent was merged)
+    if "Player_full" in merged.columns:
+        weighted["Player"] = merged["Player_full"]
+    else:
+        weighted["Player"] = merged["Player"]
+
     weighted["Team"] = merged["Team"]
 
     # Keep GP from full season (accurate games played)
@@ -152,75 +202,146 @@ def merge_and_weight_stats(full_df, recent_df, recent_weight=0.70):
         gp_col = "GP"
     elif "Games Played" in full_df.columns:
         gp_col = "Games Played"
-    
+
     if gp_col:
-        weighted[gp_col] = merged[f"{gp_col}_full"]
+        if has_recent and f"{gp_col}_full" in merged.columns:
+            weighted[gp_col] = merged[f"{gp_col}_full"]
+        else:
+            weighted[gp_col] = merged[gp_col]
 
     # Keep Position if available
     if "Position" in full_df.columns:
-        weighted["Position"] = merged.get("Position_full", merged.get("Position"))
+        if has_recent and "Position_full" in merged.columns:
+            weighted["Position"] = merged["Position_full"]
+        else:
+            weighted["Position"] = merged["Position"]
 
-    # Weight all numeric stats
+    # Weight all numeric stats (three-way blend)
     for stat in stats_to_weight:
-        full_col = f"{stat}_full"
-        recent_col = f"{stat}_recent"
+        # Determine column names based on what merges happened
+        if has_recent:
+            full_col = f"{stat}_full"
+            recent_col = f"{stat}_recent"
+        else:
+            full_col = stat
+            recent_col = None
+
+        # Last year column (if it exists after merge)
+        if has_last_year:
+            # The column might be stat_lastyear or just exist without suffix if no conflicts
+            if f"{stat}_lastyear" in merged.columns:
+                lastyear_col = f"{stat}_lastyear"
+            elif has_recent and stat not in merged.columns and f"{stat}_full" not in merged.columns:
+                # Edge case: stat only exists in last year
+                lastyear_col = stat
+            else:
+                lastyear_col = None
+        else:
+            lastyear_col = None
 
         # Convert to numeric, coercing errors to NaN
-        full_vals = pd.to_numeric(merged[full_col], errors='coerce')
-        recent_vals = pd.to_numeric(merged.get(recent_col, pd.Series([np.nan] * len(merged))), errors='coerce')
+        full_vals = pd.to_numeric(merged.get(full_col, pd.Series([np.nan] * len(merged))), errors='coerce')
+        recent_vals = pd.to_numeric(merged.get(recent_col, pd.Series([np.nan] * len(merged))), errors='coerce') if recent_col else pd.Series([np.nan] * len(merged))
+        lastyear_vals = pd.to_numeric(merged.get(lastyear_col, pd.Series([np.nan] * len(merged))), errors='coerce') if lastyear_col else pd.Series([np.nan] * len(merged))
 
-        # Weighted average: use recent if available, otherwise full season
-        weighted[stat] = full_vals.where(
-            recent_vals.isna(),
-            full_vals * full_weight + recent_vals * recent_weight
-        )
+        # Three-way weighted average
+        # Start with zeros, then add each component where available
+        weighted[stat] = pd.Series([0.0] * len(merged))
+
+        # Track total weight actually used for each player
+        total_weight = pd.Series([0.0] * len(merged))
+
+        # Add full season component
+        mask_full = full_vals.notna()
+        weighted.loc[mask_full, stat] += full_vals[mask_full] * full_weight
+        total_weight[mask_full] += full_weight
+
+        # Add recent component
+        if has_recent:
+            mask_recent = recent_vals.notna()
+            weighted.loc[mask_recent, stat] += recent_vals[mask_recent] * recent_weight
+            total_weight[mask_recent] += recent_weight
+
+        # Add last year component
+        if has_last_year:
+            mask_lastyear = lastyear_vals.notna()
+            weighted.loc[mask_lastyear, stat] += lastyear_vals[mask_lastyear] * last_year_weight
+            total_weight[mask_lastyear] += last_year_weight
+
+        # Normalize by actual total weight (handles missing data)
+        mask_has_data = total_weight > 0
+        weighted.loc[mask_has_data, stat] = weighted.loc[mask_has_data, stat] / total_weight[mask_has_data]
+
+        # If no data at all, set to NaN
+        weighted.loc[~mask_has_data, stat] = np.nan
 
     return weighted
 
 
-def download_nst_data(db_path, recent_weight=None):
+def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_weight=None):
     """
-    Download live player stats from Natural Stat Trick with recent form weighting.
+    Download live player stats from Natural Stat Trick with three-way weighting.
+    Combines current season (recent + full) with last year's stats.
     Filters rosters to only include skaters who played in their team's last game (injury/trade filtering).
 
     Args:
         db_path (str): Path to SQLite database file
-        recent_weight (float): Weight for last 10 games (0-1), uses RECENT_FORM_WEIGHT from config if None
+        recent_weight (float): Weight for last 10 games, uses RECENT_FORM_WEIGHT from config if None
+        full_weight (float): Weight for current full season, uses FULL_SEASON_WEIGHT from config if None
+        last_year_weight (float): Weight for last year, uses LAST_YEAR_WEIGHT from config if None
 
     Returns:
         pd.DataFrame: Weighted player data (skaters + goalies)
     """
     if recent_weight is None:
-        recent_weight = RECENT_FORM_WEIGHT  # Use config value
+        recent_weight = RECENT_FORM_WEIGHT
+    if full_weight is None:
+        full_weight = FULL_SEASON_WEIGHT
+    if last_year_weight is None:
+        last_year_weight = LAST_YEAR_WEIGHT
 
     print(f"Downloading live 2025-26 player stats from Natural Stat Trick...")
-    print(f"   Weighting: {recent_weight:.0%} recent form, {(1-recent_weight):.0%} full season")
+    print(f"   Weighting: {recent_weight:.0%} recent (L10) + {full_weight:.0%} full season + {last_year_weight:.0%} last year")
 
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    # URLs for full season (rate=y for per-60 stats, sit=all for all situations)
+    # URLs for CURRENT SEASON (2025-26) full season (rate=y for per-60 stats, sit=all for all situations)
     skaters_full_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=none&fd=&td=&tgp=410&lines=single&draftteam=ALL"
     goalies_full_url = skaters_full_url.replace("&pos=S", "&pos=G").replace("stdoi=oi", "stdoi=g")
 
-    # URLs for last 10 games (rate=y for per-60 stats, sit=all for all situations)
+    # URLs for CURRENT SEASON last 10 games (rate=y for per-60 stats, sit=all for all situations)
     skaters_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
     goalies_recent_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=g&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=10&lines=single&draftteam=ALL"
 
     # URL for last game rosters (gp=1) - identifies active roster (injuries/trades)
     skaters_last_game_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20252026&thruseason=20252026&stype=2&sit=all&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=gpteam&fd=&td=&tgp=1&lines=single&draftteam=ALL"
 
-    # Download all datasets
-    skaters_full = download_nst_stats(skaters_full_url, headers, "Full season skaters")
-    goalies_full = download_nst_stats(goalies_full_url, headers, "Full season goalies")
-    skaters_recent = download_nst_stats(skaters_recent_url, headers, "Last 10 games skaters")
-    goalies_recent = download_nst_stats(goalies_recent_url, headers, "Last 10 games goalies")
+    # URLs for LAST YEAR (2024-25) full season stats
+    skaters_lastyear_url = "https://www.naturalstattrick.com/playerteams.php?fromseason=20242025&thruseason=20242025&stype=2&sit=all&score=all&stdoi=oi&rate=y&team=ALL&pos=S&loc=B&toi=0&gpfilt=none&fd=&td=&tgp=410&lines=single&draftteam=ALL"
+    goalies_lastyear_url = skaters_lastyear_url.replace("&pos=S", "&pos=G").replace("stdoi=oi", "stdoi=g")
+
+    # Download current season datasets
+    skaters_full = download_nst_stats(skaters_full_url, headers, "Full season skaters (2025-26)")
+    goalies_full = download_nst_stats(goalies_full_url, headers, "Full season goalies (2025-26)")
+    skaters_recent = download_nst_stats(skaters_recent_url, headers, "Last 10 games skaters (2025-26)")
+    goalies_recent = download_nst_stats(goalies_recent_url, headers, "Last 10 games goalies (2025-26)")
     skaters_last_game = download_nst_stats(skaters_last_game_url, headers, "Last game rosters (injury/trade filter)")
+
+    # Download last year's datasets (if enabled)
+    skaters_lastyear = pd.DataFrame()
+    goalies_lastyear = pd.DataFrame()
+    if last_year_weight > 0:
+        print("   Downloading last year (2024-25) stats for supplemental weighting...")
+        skaters_lastyear = download_nst_stats(skaters_lastyear_url, headers, "Last year skaters (2024-25)")
+        goalies_lastyear = download_nst_stats(goalies_lastyear_url, headers, "Last year goalies (2024-25)")
 
     # Add Position='G' to goalies (they don't have position column from NST)
     if not goalies_full.empty:
         goalies_full['Position'] = 'G'
     if not goalies_recent.empty:
         goalies_recent['Position'] = 'G'
+    if not goalies_lastyear.empty:
+        goalies_lastyear['Position'] = 'G'
 
     # Check if we got any data
     if skaters_full.empty and goalies_full.empty:
@@ -275,10 +396,16 @@ def download_nst_data(db_path, recent_weight=None):
     else:
         print("   ⚠ Could not identify last game roster - using all players")
 
-    # Merge and weight stats
+    # Merge and weight stats (three-way: recent + full + last year)
     print("   Merging and weighting stats...")
-    skaters_weighted = merge_and_weight_stats(skaters_full, skaters_recent, recent_weight)
-    goalies_weighted = merge_and_weight_stats(goalies_full, goalies_recent, recent_weight)
+    skaters_weighted = merge_and_weight_stats(
+        skaters_full, skaters_recent, skaters_lastyear,
+        recent_weight, full_weight, last_year_weight
+    )
+    goalies_weighted = merge_and_weight_stats(
+        goalies_full, goalies_recent, goalies_lastyear,
+        recent_weight, full_weight, last_year_weight
+    )
 
     # Combine skaters and goalies
     all_players = pd.concat([skaters_weighted, goalies_weighted], ignore_index=True, sort=False)
@@ -337,7 +464,7 @@ def view_team_rosters(db_path, min_toi=None):
         return
 
     print("\n" + "=" * 140)
-    print("PLAYER STATS BY TEAM (70% xG + 30% Actual Goals, 60% Recent Form + 40% Full Season)")
+    print("PLAYER STATS BY TEAM (70% xG + 30% Actual Goals, 55% Recent L10 + 30% Full Season + 15% Last Year)")
     print("=" * 140)
 
     # Group by team
