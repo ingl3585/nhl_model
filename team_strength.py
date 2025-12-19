@@ -50,45 +50,47 @@ def get_team_strength(team, db_path, location):
 
     if has_active_roster:
         # Include players from last game (no TOI filter needed)
+        # Join on (Player, Team, Position) instead of Player_ID since Player_ID is just
+        # NST's row number and differs between datasets
         query = f'''
             SELECT
                 -- Forward offense (xGF/60)
-                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{xgf_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{toi_col}" END), 0) as forward_xgf,
+                COALESCE(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{xgf_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{toi_col}" END), 0) as forward_xgf,
                 -- Forward offense (actual GF/60)
-                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{gf_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{toi_col}" END), 0) as forward_gf,
+                COALESCE(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{gf_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{toi_col}" END), 0) as forward_gf,
 
                 -- Defense offense (xGF/60)
-                COALESCE(SUM(CASE WHEN Position = 'D' THEN "{xgf_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position = 'D' THEN "{toi_col}" END), 0) as defense_xgf,
+                COALESCE(SUM(CASE WHEN p.Position = 'D' THEN p."{xgf_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position = 'D' THEN p."{toi_col}" END), 0) as defense_xgf,
                 -- Defense offense (actual GF/60)
-                COALESCE(SUM(CASE WHEN Position = 'D' THEN "{gf_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position = 'D' THEN "{toi_col}" END), 0) as defense_gf,
+                COALESCE(SUM(CASE WHEN p.Position = 'D' THEN p."{gf_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position = 'D' THEN p."{toi_col}" END), 0) as defense_gf,
 
                 -- Forward defense (xGA/60)
-                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{xga_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{toi_col}" END), 0) as forward_xga,
+                COALESCE(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{xga_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{toi_col}" END), 0) as forward_xga,
                 -- Forward defense (actual GA/60)
-                COALESCE(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{ga_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position IN ('C', 'L', 'R') THEN "{toi_col}" END), 0) as forward_ga,
+                COALESCE(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{ga_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position IN ('C', 'L', 'R') THEN p."{toi_col}" END), 0) as forward_ga,
 
                 -- Defense defense (xGA/60)
-                COALESCE(SUM(CASE WHEN Position = 'D' THEN "{xga_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position = 'D' THEN "{toi_col}" END), 0) as defense_xga,
+                COALESCE(SUM(CASE WHEN p.Position = 'D' THEN p."{xga_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position = 'D' THEN p."{toi_col}" END), 0) as defense_xga,
                 -- Defense defense (actual GA/60)
-                COALESCE(SUM(CASE WHEN Position = 'D' THEN "{ga_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position = 'D' THEN "{toi_col}" END), 0) as defense_ga,
+                COALESCE(SUM(CASE WHEN p.Position = 'D' THEN p."{ga_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position = 'D' THEN p."{toi_col}" END), 0) as defense_ga,
 
                 -- Goalie defense (xG Against/60)
-                COALESCE(SUM(CASE WHEN Position = 'G' THEN "{xga_goalie_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position = 'G' THEN "{toi_col}" END), 0) as goalie_xga,
+                COALESCE(SUM(CASE WHEN p.Position = 'G' THEN p."{xga_goalie_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position = 'G' THEN p."{toi_col}" END), 0) as goalie_xga,
                 -- Goalie defense (actual GAA)
-                COALESCE(SUM(CASE WHEN Position = 'G' THEN "{gaa_col}" * "{toi_col}" END), 0) /
-                NULLIF(SUM(CASE WHEN Position = 'G' THEN "{toi_col}" END), 0) as goalie_gaa
-            FROM players
-            WHERE Team = ?
-              AND Player_ID IN (SELECT Player_ID FROM active_roster)
+                COALESCE(SUM(CASE WHEN p.Position = 'G' THEN p."{gaa_col}" * p."{toi_col}" END), 0) /
+                NULLIF(SUM(CASE WHEN p.Position = 'G' THEN p."{toi_col}" END), 0) as goalie_gaa
+            FROM players p
+            INNER JOIN active_roster ar ON p.Player = ar.Player AND p.Team = ar.Team AND p.Position = ar.Position
+            WHERE p.Team = ?
         '''
     else:
         # Fallback: no active roster table, can't filter reliably

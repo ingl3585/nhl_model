@@ -345,9 +345,11 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     skaters_recent_away_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="A", gpfilt="gpteam", tgp="10")
     goalies_recent_away_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="A", gpfilt="gpteam", tgp="10")
 
-    # URLs for last game roster (loc=B - combined, just to identify active players)
+    # URLs for active roster identification
+    # Skaters: last game (tgp=1) - large rosters so one game captures most players
+    # Goalies: last 10 games (tgp=10) - need L10 to capture both starter AND backup goalies
     skaters_last_game_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="B", gpfilt="gpteam", tgp="1")
-    goalies_last_game_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="B", gpfilt="gpteam", tgp="1")
+    goalies_active_roster_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="B", gpfilt="gpteam", tgp="10")
 
     # URLs for LAST YEAR (2024-25) - HOME
     skaters_lastyear_home_url = base_url_template.format(season="20242025", stdoi="oi", pos="S", loc="H", gpfilt="none", tgp="410")
@@ -371,10 +373,12 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     skaters_recent_away = download_nst_stats(skaters_recent_away_url, headers, "Last 10 games skaters AWAY (2025-26)")
     goalies_recent_away = download_nst_stats(goalies_recent_away_url, headers, "Last 10 games goalies AWAY (2025-26)")
 
-    # Download last game roster (loc=B - combined, just for active roster identification)
-    print("   Downloading last game roster (injury/trade filter)...")
+    # Download active roster data for injury/trade filtering
+    # Skaters: last game captures most of the roster
+    # Goalies: L10 needed to capture both starter and backup (only 1-2 goalies play per game)
+    print("   Downloading active roster data (injury/trade filter)...")
     skaters_last_game = download_nst_stats(skaters_last_game_url, headers, "Last game skaters roster")
-    goalies_last_game = download_nst_stats(goalies_last_game_url, headers, "Last game goalies roster")
+    goalies_active = download_nst_stats(goalies_active_roster_url, headers, "Last 10 games goalies roster (captures backups)")
 
     # Download last year's datasets (if enabled)
     skaters_lastyear_home = pd.DataFrame()
@@ -410,7 +414,9 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
 
     # Use last game roster to identify active players and update team assignments for traded players
     # We DON'T filter datasets - let the natural data determine who has home/away stats
-    active_player_ids = set()
+    # NOTE: We track active players by (Player, Team, Position) instead of Player_ID because
+    # Player_ID is just NST's row number and differs between datasets (home vs away vs last game)
+    active_players_list = []
 
     if not skaters_last_game.empty:
         skaters_last_game_filtered = skaters_last_game.copy()
@@ -441,19 +447,20 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
             if not skaters_recent_away.empty and "Player" in skaters_recent_away.columns:
                 skaters_recent_away["Team"] = skaters_recent_away.apply(update_team, axis=1)
 
-        # Track active player IDs for active_roster table
-        active_player_ids = set(skaters_last_game_filtered["Player_ID"])
-        print(f"   ✓ Identified {len(active_player_ids)} active skaters from last game")
+        # Track active skaters using (Player, Team, Position) for reliable matching
+        active_skaters = skaters_last_game_filtered[["Player", "Team", "Position"]].copy()
+        active_players_list.append(active_skaters)
+        print(f"   ✓ Identified {len(active_skaters)} active skaters from last game")
 
-    # Same for goalies
-    if not goalies_last_game.empty:
-        goalies_last_game['Position'] = 'G'
-        goalies_last_game["Team"] = goalies_last_game["Team"].apply(clean_team_name)
-        print(f"   → Last game roster: {len(goalies_last_game)} goalies")
+    # Same for goalies - use L10 to capture both starter and backup
+    if not goalies_active.empty:
+        goalies_active['Position'] = 'G'
+        goalies_active["Team"] = goalies_active["Team"].apply(clean_team_name)
+        print(f"   → Active goalies (L10): {len(goalies_active)} goalies")
 
         # Update team assignments for traded goalies
-        if "Player" in goalies_last_game.columns:
-            goalie_team_map = dict(zip(goalies_last_game["Player"], goalies_last_game["Team"]))
+        if "Player" in goalies_active.columns:
+            goalie_team_map = dict(zip(goalies_active["Player"], goalies_active["Team"]))
 
             def update_goalie_team(row):
                 if row["Player"] in goalie_team_map:
@@ -470,9 +477,10 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
             if not goalies_recent_away.empty:
                 goalies_recent_away["Team"] = goalies_recent_away.apply(update_goalie_team, axis=1)
 
-        # Track active goalie IDs
-        active_player_ids = active_player_ids.union(set(goalies_last_game["Player_ID"]))
-        print(f"   ✓ Identified {len(goalies_last_game)} active goalies from last game")
+        # Track active goalies using (Player, Team, Position) for reliable matching
+        active_goalies = goalies_active[["Player", "Team", "Position"]].copy()
+        active_players_list.append(active_goalies)
+        print(f"   ✓ Identified {len(active_goalies)} active goalies from L10 (includes backups)")
 
     # Merge and weight stats separately for HOME and AWAY
     print("   Merging and weighting HOME stats...")
@@ -571,13 +579,14 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
         conn = sqlite3.connect(db_path)
         all_players.to_sql("players", conn, if_exists="replace", index=False)
 
-        # Store active player IDs (from last game home + away) in a separate table
-        if active_player_ids:
-            active_ids_df = pd.DataFrame({
-                "Player_ID": list(active_player_ids)
-            })
-            active_ids_df.to_sql("active_roster", conn, if_exists="replace", index=False)
-            print(f"   ✓ Saved {len(active_player_ids)} active roster players")
+        # Store active players (from last game) in a separate table using (Player, Team, Position)
+        # This allows reliable matching since Player_ID is just NST's row number and differs between datasets
+        if active_players_list:
+            active_roster_df = pd.concat(active_players_list, ignore_index=True)
+            # Remove any duplicates (shouldn't happen, but safety check)
+            active_roster_df = active_roster_df.drop_duplicates(subset=["Player", "Team", "Position"])
+            active_roster_df.to_sql("active_roster", conn, if_exists="replace", index=False)
+            print(f"   ✓ Saved {len(active_roster_df)} active roster players (matched by Player+Team+Position)")
 
         conn.close()
         print(f"   ✓ Success: {len(all_players)} weighted players saved to {db_path}")
@@ -607,10 +616,10 @@ def view_team_rosters(db_path, min_toi=None):
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='active_roster'")
         has_active_roster = cursor.fetchone() is not None
 
-        active_ids = set()
+        active_roster_df = None
         if has_active_roster:
-            active_df = pd.read_sql("SELECT Player_ID FROM active_roster", conn)
-            active_ids = set(active_df["Player_ID"])
+            # Active roster now uses (Player, Team, Position) instead of Player_ID
+            active_roster_df = pd.read_sql("SELECT Player, Team, Position FROM active_roster", conn)
 
         conn.close()
     except Exception as e:
@@ -629,9 +638,14 @@ def view_team_rosters(db_path, min_toi=None):
     for team in sorted(df["Team"].unique()):
         team_players = df[df["Team"] == team].copy()
 
-        # Filter to active roster only (no TOI filter with home/away splits)
-        if has_active_roster:
-            team_players = team_players[team_players["Player_ID"].isin(active_ids)]
+        # Filter to active roster only using (Player, Team, Position) matching
+        if has_active_roster and active_roster_df is not None:
+            # Merge to find active players - keep only rows that match active roster
+            team_players = team_players.merge(
+                active_roster_df,
+                on=["Player", "Team", "Position"],
+                how="inner"
+            )
 
         if team_players.empty:
             continue
