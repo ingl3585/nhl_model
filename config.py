@@ -25,8 +25,9 @@ PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 # SIMULATION SETTINGS
 # =============================================================================
 N_SIMS_FULL = 481                      # Full season simulations
-N_SIMS_TODAY = 2025                       # Simulations per today's game
-HOME_ICE_ADVANTAGE = 1.05              # 5% boost for home team (~54% win rate)
+N_SIMS_TODAY = 3001                    # Simulations per today's game
+# HOME_ICE_ADVANTAGE removed - now using actual home/away player stats from NST
+# Home advantage is built into the empirical performance differences between locations
 LEAGUE_AVG_XG_PER_60 = 3.10            # All-situations league average (updated from 2.95 for 5v5)
 OT_HOME_WIN_PROB = 0.55                # Historical: ~55% of OT/SO won by home team
 TEAM_STRENGTH_VARIANCE = 0.15          # ±15% game-to-game variance (injuries, form, etc.)

@@ -4,7 +4,7 @@
 import numpy as np
 from tqdm import tqdm
 from config import (
-    HOME_ICE_ADVANTAGE, LEAGUE_AVG_XG_PER_60, OT_HOME_WIN_PROB,
+    LEAGUE_AVG_XG_PER_60, OT_HOME_WIN_PROB,
     N_SIMS_TODAY, TEAM_STRENGTH_VARIANCE
 )
 from team_strength import get_team_strength
@@ -19,11 +19,11 @@ def clear_strength_cache():
     _strength_cache = {}
 
 
-def get_cached_strength(team, db_path):
+def get_cached_strength(team, db_path, location):
     """Get team strength with caching to avoid repeated DB queries."""
-    cache_key = (team, db_path)
+    cache_key = (team, db_path, location)
     if cache_key not in _strength_cache:
-        _strength_cache[cache_key] = get_team_strength(team, db_path)
+        _strength_cache[cache_key] = get_team_strength(team, db_path, location)
     return _strength_cache[cache_key]
 
 
@@ -72,13 +72,13 @@ def simulate_game(home, away, db_path, use_cache=True):
         tuple: (winner, home_pts, away_pts, home_goals, away_goals, win_type)
                win_type is 'REG', 'OT', or 'SO'
     """
-    # Get team strengths (cached or fresh)
+    # Get team strengths with location (home team plays at home, away team plays away)
     if use_cache:
-        ho, hd = get_cached_strength(home, db_path)
-        ao, ad = get_cached_strength(away, db_path)
+        ho, hd = get_cached_strength(home, db_path, location="home")
+        ao, ad = get_cached_strength(away, db_path, location="away")
     else:
-        ho, hd = get_team_strength(home, db_path)
-        ao, ad = get_team_strength(away, db_path)
+        ho, hd = get_team_strength(home, db_path, location="home")
+        ao, ad = get_team_strength(away, db_path, location="away")
 
     # Apply game-to-game variance using normal distribution (more realistic than uniform)
     if TEAM_STRENGTH_VARIANCE > 0:
@@ -91,12 +91,13 @@ def simulate_game(home, away, db_path, use_cache=True):
         ao *= away_var
         ad *= away_var
 
-    # Calculate expected goals using symmetric home ice advantage
-    # Formula: League Avg * (Offense / League Avg) * (Opponent Defense / League Avg) * Home Ice Factor
+    # Calculate expected goals using location-specific team strength
+    # Home ice advantage is now built into the home/away stats (no multiplier needed)
+    # Formula: League Avg * (Offense / League Avg) * (Opponent Defense / League Avg)
     home_xg = (LEAGUE_AVG_XG_PER_60 * (ho / LEAGUE_AVG_XG_PER_60) *
-               (ad / LEAGUE_AVG_XG_PER_60) * HOME_ICE_ADVANTAGE)
+               (ad / LEAGUE_AVG_XG_PER_60))
     away_xg = (LEAGUE_AVG_XG_PER_60 * (ao / LEAGUE_AVG_XG_PER_60) *
-               (hd / LEAGUE_AVG_XG_PER_60) / HOME_ICE_ADVANTAGE)
+               (hd / LEAGUE_AVG_XG_PER_60))
 
     # Sanity clamp expected goals (NHL games rarely exceed 6 goals per team)
     home_xg = max(0.5, min(home_xg, 6.0))
@@ -133,11 +134,12 @@ def predict_todays_games(today_games, db_path, confidence_threshold=0.60):
     """
     predictions = []
 
-    # Pre-cache team strengths for efficiency
+    # Pre-cache team strengths for efficiency (both home and away for each team)
     clear_strength_cache()
     all_teams = set(today_games["home"].tolist() + today_games["visitor"].tolist())
     for team in all_teams:
-        get_cached_strength(team, db_path)
+        get_cached_strength(team, db_path, location="home")
+        get_cached_strength(team, db_path, location="away")
 
     for _, game in today_games.iterrows():
         home, away = game["home"], game["visitor"]
