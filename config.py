@@ -7,7 +7,9 @@ from datetime import datetime
 # AUTO-GENERATED VALUES
 # =============================================================================
 TODAY = datetime.now()
-CURRENT_SEASON_START_YEAR = 2025 if TODAY.month >= 7 else 2024
+# NHL season runs October-June. If we're in July-Dec, we're in the new season that starts this year.
+# If we're in Jan-June, we're still in the season that started last year.
+CURRENT_SEASON_START_YEAR = TODAY.year if TODAY.month >= 7 else TODAY.year - 1
 CURRENT_SEASON_END_YEAR = CURRENT_SEASON_START_YEAR + 1
 CURRENT_SEASON_FULL = f"{CURRENT_SEASON_START_YEAR}-{CURRENT_SEASON_END_YEAR}"
 SEASON_CODE = str(CURRENT_SEASON_END_YEAR) # Hockey-Reference uses end year
@@ -24,8 +26,8 @@ PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 # =============================================================================
 # SIMULATION SETTINGS
 # =============================================================================
-N_SIMS_FULL = 1                      # Full season simulations
-N_SIMS_TODAY = 1                   # Simulations per today's game
+N_SIMS_FULL = 105                      # Full season simulations
+N_SIMS_TODAY = 10294                   # Simulations per today's game
 # HOME_ICE_ADVANTAGE removed - now using actual home/away player stats from NST
 # Home advantage is built into the empirical performance differences between locations
 LEAGUE_AVG_XG_PER_60 = 3.10            # All-situations league average (updated from 2.95 for 5v5)
@@ -66,7 +68,7 @@ XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
 # DISPLAY SETTINGS
 # =============================================================================
 SHOW_TODAYS_GAMES = True
-SHOW_ROSTER_DUMP = True               # Set True if you want full roster print
+SHOW_ROSTER_DUMP = False               # Set True if you want full roster print
 SHOW_PROGRESS_EVERY = 2000             # Print progress every N sims
 
 # =============================================================================
@@ -78,5 +80,28 @@ TEAM_ABBREV_FIXES = {
     "T.B": "Tampa Bay Lightning",
     "S.J": "San Jose Sharks",
 }
+
+# =============================================================================
+# VISUALIZATION SETTINGS
+# =============================================================================
+ENABLE_VISUALIZATIONS = True            # Master switch for chart generation
+VIZ_OUTPUT_DIR = "data/visualizations"  # Directory for saved charts
+VIZ_FORMAT = "png"                      # Output format: "png" or "pdf"
+VIZ_DPI = 300                           # Resolution (300 = print quality)
+
+# Chart dimensions (width, height in inches)
+TODAY_GAMES_FIGURE_SIZE = (16, 10)      # Game cards grid
+PLAYOFF_BAR_FIGURE_SIZE = (14, 12)      # Playoff probability bars
+CUP_BAR_FIGURE_SIZE = (12, 8)           # Cup probability bars
+HEATMAP_FIGURE_SIZE = (14, 16)          # Probability heatmap
+
+# Color schemes (hex colors)
+EAST_PRIMARY = "#1f77b4"                # Blue for Eastern Conference
+WEST_PRIMARY = "#d62728"                # Red for Western Conference
+
+# Chart-specific settings
+TODAY_GAMES_GRID_COLS = 2               # Columns for game cards (2 or 3)
+CUP_CHART_TOP_N = 20                    # Number of teams in Cup chart
+HEATMAP_COLORMAP = "Blues"              # Matplotlib colormap name
 
 print(f"Config loaded → Season {CURRENT_SEASON_FULL} | Today: {TODAY_PRETTY}")

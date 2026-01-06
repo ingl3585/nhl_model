@@ -118,6 +118,14 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
     seeding_counter = Counter()  # Track (conference, seed, team) tuples
     matchup_counter = Counter()  # Track Round 1 matchups
 
+    # Track matchups for all rounds
+    round2_matchup_counter = Counter()  # Track Round 2 matchups: (conf, team1, team2)
+    conf_finals_matchup_counter = Counter()  # Track Conference Finals matchups: (conf, team1, team2)
+    cup_finals_matchup_counter = Counter()  # Track Stanley Cup Finals matchups: (east_champ, west_champ)
+
+    # Track complete bracket paths for "most likely outcome"
+    bracket_path_counter = Counter()  # Track full bracket outcomes as frozen tuples
+
     print(f"\nRunning {n_sims:,} full-season simulations on {len(remaining_games)} games...")
 
     for sim in tqdm(range(n_sims), desc="Season simulations", unit="sim"):
@@ -282,32 +290,95 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
 
         # Simulate playoffs and track each round
         playoff_results = simulate_playoffs(playoff_teams, final, db_path)
-        
+
         # Count teams advancing through each round
         for team in playoff_results['round1']:
             round1_counter[team] += 1
-        
+
         for team in playoff_results['round2']:
             round2_counter[team] += 1
-        
+
         for team in playoff_results['conf_finals']:
             conf_finals_counter[team] += 1
-        
+
         if playoff_results['cup_winner']:
             cup_counter[playoff_results['cup_winner']] += 1
 
-    return playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter, seeding_counter, matchup_counter
+        # Track Round 2 matchups (normalize order for consistent counting)
+        for conf in ['east', 'west']:
+            for matchup in playoff_results['round2_matchups'][conf]:
+                team1, team2, winner = matchup
+                # Normalize: alphabetically sort team names for consistent key
+                normalized = tuple(sorted([team1, team2]))
+                round2_matchup_counter[(conf.upper(), normalized[0], normalized[1])] += 1
+
+        # Track Conference Finals matchups
+        for conf in ['east', 'west']:
+            matchup = playoff_results['conf_finals_matchups'][conf]
+            if matchup:
+                team1, team2, winner = matchup
+                normalized = tuple(sorted([team1, team2]))
+                conf_finals_matchup_counter[(conf.upper(), normalized[0], normalized[1])] += 1
+
+        # Track Stanley Cup Finals matchup
+        if playoff_results['cup_finals_matchup']:
+            east_champ, west_champ, winner = playoff_results['cup_finals_matchup']
+            # Always store as (east, west) for consistency
+            cup_finals_matchup_counter[(east_champ, west_champ)] += 1
+
+        # Track complete bracket path for "most likely outcome"
+        # Create a hashable representation of the full bracket
+        bracket_path = []
+
+        # Round 1 results (8 series)
+        for conf in ['east', 'west']:
+            for matchup in playoff_results['round1_matchups'][conf]:
+                team1, team2, winner = matchup
+                bracket_path.append((f"R1_{conf}", team1, team2, winner))
+
+        # Round 2 results (4 series)
+        for conf in ['east', 'west']:
+            for matchup in playoff_results['round2_matchups'][conf]:
+                team1, team2, winner = matchup
+                bracket_path.append((f"R2_{conf}", team1, team2, winner))
+
+        # Conference Finals results (2 series)
+        for conf in ['east', 'west']:
+            matchup = playoff_results['conf_finals_matchups'][conf]
+            if matchup:
+                team1, team2, winner = matchup
+                bracket_path.append((f"CF_{conf}", team1, team2, winner))
+
+        # Stanley Cup Final
+        if playoff_results['cup_finals_matchup']:
+            east_champ, west_champ, winner = playoff_results['cup_finals_matchup']
+            bracket_path.append(("SCF", east_champ, west_champ, winner))
+
+        # Convert to tuple for hashing
+        bracket_path_counter[tuple(bracket_path)] += 1
+
+    return (playoff_counter, round1_counter, round2_counter, conf_finals_counter,
+            cup_counter, pres_counter, seeding_counter, matchup_counter,
+            round2_matchup_counter, conf_finals_matchup_counter,
+            cup_finals_matchup_counter, bracket_path_counter)
 
 
-def display_playoff_matchups(seeding_counter, matchup_counter, n_sims, min_probability=0.05):
+def display_playoff_matchups(seeding_counter, matchup_counter, n_sims,
+                             round2_matchup_counter=None, conf_finals_matchup_counter=None,
+                             cup_finals_matchup_counter=None, bracket_path_counter=None,
+                             min_probability=0.05):
     """
-    Display most likely playoff seedings and Round 1 matchups.
+    Display most likely playoff seedings and matchups for all rounds.
 
     Args:
         seeding_counter (Counter): Counter of (conference, seed, team) tuples
         matchup_counter (Counter): Counter of Round 1 matchup tuples
         n_sims (int): Total number of simulations
-        min_probability (float): Minimum probability to display (default 10%)
+        round2_matchup_counter (Counter): Counter of Round 2 matchups
+        conf_finals_matchup_counter (Counter): Counter of Conference Finals matchups
+        cup_finals_matchup_counter (Counter): Counter of Stanley Cup Finals matchups
+        bracket_path_counter (Counter): Counter of complete bracket paths
+        min_probability (float): Minimum probability to display (default 5%)
     """
     print("\n" + "=" * 80)
     print("MOST LIKELY PLAYOFF SEEDINGS")
@@ -367,6 +438,140 @@ def display_playoff_matchups(seeding_counter, matchup_counter, n_sims, min_proba
                     displayed += 1
                     if displayed >= 5:  # Cap at 5 per series
                         break
+
+    # Display Round 2 matchups
+    if round2_matchup_counter:
+        print("\n" + "=" * 80)
+        print("MOST LIKELY ROUND 2 (SECOND ROUND) MATCHUPS")
+        print("=" * 80)
+
+        for conf in ["EAST", "WEST"]:
+            conf_display = "Eastern" if conf == "EAST" else "Western"
+            print(f"\n{conf_display} Conference:")
+            print("-" * 80)
+
+            # Get all Round 2 matchups for this conference
+            conf_matchups = [(key, count) for key, count in round2_matchup_counter.items()
+                            if key[0] == conf]
+
+            if conf_matchups:
+                conf_matchups.sort(key=lambda x: x[1], reverse=True)
+
+                displayed = 0
+                for matchup, count in conf_matchups[:10]:
+                    _, team1, team2 = matchup
+                    prob = count / n_sims
+                    if prob >= min_probability or displayed < 5:
+                        print(f"    {team1:28s} vs {team2:28s}  {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+                        displayed += 1
+                        if displayed >= 10:
+                            break
+
+    # Display Conference Finals matchups
+    if conf_finals_matchup_counter:
+        print("\n" + "=" * 80)
+        print("MOST LIKELY CONFERENCE FINALS MATCHUPS")
+        print("=" * 80)
+
+        for conf in ["EAST", "WEST"]:
+            conf_display = "Eastern" if conf == "EAST" else "Western"
+            print(f"\n{conf_display} Conference Final:")
+            print("-" * 80)
+
+            # Get all Conference Finals matchups for this conference
+            conf_matchups = [(key, count) for key, count in conf_finals_matchup_counter.items()
+                            if key[0] == conf]
+
+            if conf_matchups:
+                conf_matchups.sort(key=lambda x: x[1], reverse=True)
+
+                displayed = 0
+                for matchup, count in conf_matchups[:10]:
+                    _, team1, team2 = matchup
+                    prob = count / n_sims
+                    if prob >= min_probability or displayed < 5:
+                        print(f"    {team1:28s} vs {team2:28s}  {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+                        displayed += 1
+                        if displayed >= 10:
+                            break
+
+    # Display Stanley Cup Finals matchups
+    if cup_finals_matchup_counter:
+        print("\n" + "=" * 80)
+        print("MOST LIKELY STANLEY CUP FINALS MATCHUP")
+        print("=" * 80)
+
+        cup_matchups = list(cup_finals_matchup_counter.items())
+        cup_matchups.sort(key=lambda x: x[1], reverse=True)
+
+        displayed = 0
+        for matchup, count in cup_matchups[:15]:
+            east_champ, west_champ = matchup
+            prob = count / n_sims
+            if prob >= min_probability or displayed < 5:
+                print(f"    {east_champ:28s} vs {west_champ:28s}  {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+                displayed += 1
+                if displayed >= 15:
+                    break
+
+    # Display most likely complete bracket outcome
+    if bracket_path_counter:
+        print("\n" + "=" * 80)
+        print("MOST LIKELY COMPLETE PLAYOFF BRACKET OUTCOME")
+        print("=" * 80)
+
+        # Get the most common bracket path
+        most_common_paths = bracket_path_counter.most_common(5)
+
+        if most_common_paths:
+            for rank, (path, count) in enumerate(most_common_paths, 1):
+                prob = count / n_sims
+                print(f"\n#{rank} Most Likely Bracket ({prob*100:.2f}% - {count:,}/{n_sims:,} simulations):")
+                print("-" * 80)
+
+                # Parse and display the bracket path
+                east_r1_winners = []
+                west_r1_winners = []
+                east_r2_winners = []
+                west_r2_winners = []
+                east_cf_winner = None
+                west_cf_winner = None
+                cup_winner = None
+
+                for entry in path:
+                    round_id, team1, team2, winner = entry
+
+                    if round_id == "R1_east":
+                        east_r1_winners.append(winner)
+                    elif round_id == "R1_west":
+                        west_r1_winners.append(winner)
+                    elif round_id == "R2_east":
+                        east_r2_winners.append(winner)
+                    elif round_id == "R2_west":
+                        west_r2_winners.append(winner)
+                    elif round_id == "CF_east":
+                        east_cf_winner = winner
+                    elif round_id == "CF_west":
+                        west_cf_winner = winner
+                    elif round_id == "SCF":
+                        cup_winner = winner
+
+                # Display in bracket format
+                print("  EASTERN CONFERENCE:")
+                print(f"    Round 1 Winners: {', '.join(east_r1_winners)}")
+                print(f"    Round 2 Winners: {', '.join(east_r2_winners)}")
+                print(f"    Conference Champion: {east_cf_winner}")
+
+                print("  WESTERN CONFERENCE:")
+                print(f"    Round 1 Winners: {', '.join(west_r1_winners)}")
+                print(f"    Round 2 Winners: {', '.join(west_r2_winners)}")
+                print(f"    Conference Champion: {west_cf_winner}")
+
+                print(f"  STANLEY CUP CHAMPION: {cup_winner}")
+
+                # Only show top 3 for readability (can be more verbose with N_SIMS=1)
+                if rank >= 3 and n_sims > 1:
+                    break
 
     print("\n" + "=" * 80)
     print("MOST LIKELY ROUND 1 BRACKET")
