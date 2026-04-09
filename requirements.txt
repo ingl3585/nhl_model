@@ -3,6 +3,7 @@
 pandas
 numpy
 beautifulsoup4
+setuptools
 undetected-chromedriver
 tqdm
 matplotlib>=3.5.0
