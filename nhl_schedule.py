@@ -74,11 +74,14 @@ def scrape_schedule(output_path=None):
         visitor = TEAM_MAP[visitor_code]
         home = TEAM_MAP[home_code]
 
-        vg = int(cells[3].get_text(strip=True) or 0)
-        hg = int(cells[5].get_text(strip=True) or 0)
+        vg_text = cells[3].get_text(strip=True)
+        hg_text = cells[5].get_text(strip=True)
+        vg = int(vg_text or 0)
+        hg = int(hg_text or 0)
         ot = cells[6].get_text(strip=True)
         ot = ot if ot in ["OT", "SO"] else ""
-        played = vg > 0 and hg > 0
+        # A game is played if both score cells are non-empty (even if a team scored 0)
+        played = bool(vg_text) and bool(hg_text)
 
         games.append({
             "date": date_str,
