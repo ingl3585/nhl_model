@@ -4,9 +4,15 @@
 import pandas as pd
 import numpy as np
 import sqlite3
-import requests
-from bs4 import BeautifulSoup
-from io import StringIO
+import os
+import time
+import tempfile
+import datetime
+import undetected_chromedriver as uc
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+
 from config import (
     TEAM_ABBREV_FIXES, MIN_TOI_MINUTES, RECENT_FORM_WEIGHT,
     FULL_SEASON_WEIGHT, LAST_YEAR_WEIGHT, SHOW_ROSTER_DUMP
@@ -60,27 +66,77 @@ def clean_team_name(team_str):
     return TEAM_MAP.get(last_team, team_str)
 
 
-def download_nst_stats(url, headers, dataset_name):
+def create_nst_driver():
     """
-    Download stats from a single NST URL.
+    Create an undetected Chrome driver, configure CSV downloads to a temp dir,
+    and clear the Cloudflare challenge on NST. The user only needs to solve it once;
+    cf_clearance carries over to all subsequent requests.
+    """
+    download_dir = tempfile.mkdtemp()
+
+    options = uc.ChromeOptions()
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    driver = uc.Chrome(options=options, headless=False)
+
+    # Route all downloads to our temp dir (no prompt, no browser download bar)
+    driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+        "behavior": "allow",
+        "downloadPath": download_dir
+    })
+    driver._nst_download_dir = download_dir
+
+    print("   Opening Natural Stat Trick — solve the Cloudflare check if prompted (up to 60s)...")
+    driver.get("https://www.naturalstattrick.com/")
+    WebDriverWait(driver, 60).until(lambda d: "Just a moment" not in d.title)
+    print("   Cloudflare cleared.")
+    return driver
+
+
+def download_nst_stats(url, driver, dataset_name):
+    """
+    Download stats from a single NST URL using an undetected Chrome driver.
 
     Args:
         url (str): NST URL
-        headers (dict): Request headers
+        driver: undetected_chromedriver instance (reused across calls)
         dataset_name (str): Name for logging
 
     Returns:
         pd.DataFrame: Player stats or empty DataFrame on failure
     """
     try:
-        r = requests.get(url, headers=headers, timeout=20)
-        soup = BeautifulSoup(r.text, "html.parser")
-        csv_link = soup.find("a", string=lambda t: t and "CSV" in t)
+        driver.get(url)
+        # Wait for the CSV download link — only present on the real NST page
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "CSV"))
+        )
 
-        if csv_link:
-            df = pd.read_csv("https://www.naturalstattrick.com" + csv_link["href"])
-        else:
-            df = pd.read_html(StringIO(r.text))[0]
+        dl_dir = driver._nst_download_dir
+
+        # Clear download dir before triggering new download
+        for f in os.listdir(dl_dir):
+            os.remove(os.path.join(dl_dir, f))
+
+        # Click the CSV link directly — browser handles the download natively
+        csv_element = driver.find_element(By.PARTIAL_LINK_TEXT, "CSV")
+        csv_element.click()
+
+        # Wait for the .csv file to finish downloading
+        deadline = time.time() + 20
+        csv_file = None
+        while time.time() < deadline:
+            done = [f for f in os.listdir(dl_dir)
+                    if f.endswith(".csv") and not f.endswith(".crdownload")]
+            if done:
+                csv_file = os.path.join(dl_dir, done[0])
+                break
+            time.sleep(0.3)
+
+        if not csv_file:
+            raise RuntimeError("CSV download timed out")
+
+        df = pd.read_csv(csv_file)
 
         # NST's first column is player ID (unnamed) - rename it for unique identification
         if df.columns[0] in [0, '', 'Unnamed: 0']:
@@ -325,10 +381,21 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     if last_year_weight is None:
         last_year_weight = LAST_YEAR_WEIGHT
 
+    # Skip download if db was already updated today
+    today = datetime.date.today()
+    if os.path.exists(db_path):
+        mtime = datetime.date.fromtimestamp(os.path.getmtime(db_path))
+        if mtime >= today:
+            print(f"Player data already up to date (db last updated: {mtime}). Skipping NST download.")
+            conn = sqlite3.connect(db_path)
+            df = pd.read_sql("SELECT * FROM players", conn)
+            conn.close()
+            return df
+
     print(f"Downloading live 2025-26 player stats from Natural Stat Trick...")
     print(f"   Weighting: {recent_weight:.0%} recent (L10) + {full_weight:.0%} full season + {last_year_weight:.0%} last year")
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    driver = create_nst_driver()
 
     # Base URL template for easy home/away generation
     base_url_template = "https://www.naturalstattrick.com/playerteams.php?fromseason={season}&thruseason={season}&stype=2&sit=all&score=all&stdoi={stdoi}&rate=y&team=ALL&pos={pos}&loc={loc}&toi=0&gpfilt={gpfilt}&fd=&td=&tgp={tgp}&lines=single&draftteam=ALL"
@@ -361,24 +428,24 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
 
     # Download current season HOME datasets
     print("   Downloading HOME stats...")
-    skaters_full_home = download_nst_stats(skaters_full_home_url, headers, "Full season skaters HOME (2025-26)")
-    goalies_full_home = download_nst_stats(goalies_full_home_url, headers, "Full season goalies HOME (2025-26)")
-    skaters_recent_home = download_nst_stats(skaters_recent_home_url, headers, "Last 10 games skaters HOME (2025-26)")
-    goalies_recent_home = download_nst_stats(goalies_recent_home_url, headers, "Last 10 games goalies HOME (2025-26)")
+    skaters_full_home = download_nst_stats(skaters_full_home_url, driver, "Full season skaters HOME (2025-26)")
+    goalies_full_home = download_nst_stats(goalies_full_home_url, driver, "Full season goalies HOME (2025-26)")
+    skaters_recent_home = download_nst_stats(skaters_recent_home_url, driver, "Last 10 games skaters HOME (2025-26)")
+    goalies_recent_home = download_nst_stats(goalies_recent_home_url, driver, "Last 10 games goalies HOME (2025-26)")
 
     # Download current season AWAY datasets
     print("   Downloading AWAY stats...")
-    skaters_full_away = download_nst_stats(skaters_full_away_url, headers, "Full season skaters AWAY (2025-26)")
-    goalies_full_away = download_nst_stats(goalies_full_away_url, headers, "Full season goalies AWAY (2025-26)")
-    skaters_recent_away = download_nst_stats(skaters_recent_away_url, headers, "Last 10 games skaters AWAY (2025-26)")
-    goalies_recent_away = download_nst_stats(goalies_recent_away_url, headers, "Last 10 games goalies AWAY (2025-26)")
+    skaters_full_away = download_nst_stats(skaters_full_away_url, driver, "Full season skaters AWAY (2025-26)")
+    goalies_full_away = download_nst_stats(goalies_full_away_url, driver, "Full season goalies AWAY (2025-26)")
+    skaters_recent_away = download_nst_stats(skaters_recent_away_url, driver, "Last 10 games skaters AWAY (2025-26)")
+    goalies_recent_away = download_nst_stats(goalies_recent_away_url, driver, "Last 10 games goalies AWAY (2025-26)")
 
     # Download active roster data for injury/trade filtering
     # Skaters: last game captures most of the roster
     # Goalies: L10 needed to capture both starter and backup (only 1-2 goalies play per game)
     print("   Downloading active roster data (injury/trade filter)...")
-    skaters_last_game = download_nst_stats(skaters_last_game_url, headers, "Last game skaters roster")
-    goalies_active = download_nst_stats(goalies_active_roster_url, headers, "Last 10 games goalies roster (captures backups)")
+    skaters_last_game = download_nst_stats(skaters_last_game_url, driver, "Last game skaters roster")
+    goalies_active = download_nst_stats(goalies_active_roster_url, driver, "Last 10 games goalies roster (captures backups)")
 
     # Download last year's datasets (if enabled)
     skaters_lastyear_home = pd.DataFrame()
@@ -387,11 +454,18 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     goalies_lastyear_away = pd.DataFrame()
     if last_year_weight > 0:
         print("   Downloading last year (2024-25) HOME stats...")
-        skaters_lastyear_home = download_nst_stats(skaters_lastyear_home_url, headers, "Last year skaters HOME (2024-25)")
-        goalies_lastyear_home = download_nst_stats(goalies_lastyear_home_url, headers, "Last year goalies HOME (2024-25)")
+        skaters_lastyear_home = download_nst_stats(skaters_lastyear_home_url, driver, "Last year skaters HOME (2024-25)")
+        goalies_lastyear_home = download_nst_stats(goalies_lastyear_home_url, driver, "Last year goalies HOME (2024-25)")
         print("   Downloading last year (2024-25) AWAY stats...")
-        skaters_lastyear_away = download_nst_stats(skaters_lastyear_away_url, headers, "Last year skaters AWAY (2024-25)")
-        goalies_lastyear_away = download_nst_stats(goalies_lastyear_away_url, headers, "Last year goalies AWAY (2024-25)")
+        skaters_lastyear_away = download_nst_stats(skaters_lastyear_away_url, driver, "Last year skaters AWAY (2024-25)")
+        goalies_lastyear_away = download_nst_stats(goalies_lastyear_away_url, driver, "Last year goalies AWAY (2024-25)")
+
+    try:
+        driver.quit()
+        # Suppress undetected_chromedriver's __del__ from firing a second quit on shutdown
+        driver.__class__.__del__ = lambda self: None
+    except Exception:
+        pass
 
     # Add Position='G' to goalies (they don't have position column from NST)
     if not goalies_full_home.empty:
