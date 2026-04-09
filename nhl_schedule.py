@@ -18,7 +18,7 @@ TEAM_MAP = {
     "SJS": "San Jose Sharks",
     "SEA": "Seattle Kraken", "STL": "St. Louis Blues",
     "TBL": "Tampa Bay Lightning",
-    "TOR": "Toronto Maple Leafs", "UTA": "Utah Hockey Club",
+    "TOR": "Toronto Maple Leafs", "UTA": "Utah Mammoth",
     "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights",
     "WSH": "Washington Capitals", "WPG": "Winnipeg Jets",
 }

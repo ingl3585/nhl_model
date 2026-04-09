@@ -7,7 +7,9 @@ from datetime import datetime
 # AUTO-GENERATED VALUES
 # =============================================================================
 TODAY = datetime.now()
-CURRENT_SEASON_START_YEAR = 2025 if TODAY.month >= 7 else 2024
+# NHL season runs October-June. If we're in July-Dec, we're in the new season that starts this year.
+# If we're in Jan-June, we're still in the season that started last year.
+CURRENT_SEASON_START_YEAR = TODAY.year if TODAY.month >= 7 else TODAY.year - 1
 CURRENT_SEASON_END_YEAR = CURRENT_SEASON_START_YEAR + 1
 CURRENT_SEASON_FULL = f"{CURRENT_SEASON_START_YEAR}-{CURRENT_SEASON_END_YEAR}"
 SEASON_CODE = str(CURRENT_SEASON_END_YEAR) # Hockey-Reference uses end year
@@ -24,12 +26,20 @@ PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 # =============================================================================
 # SIMULATION SETTINGS
 # =============================================================================
-N_SIMS_FULL = 25                       # Full season simulations
-N_SIMS_TODAY = 500                     # Simulations per today's game
-HOME_ICE_ADVANTAGE = 1.10
-LEAGUE_AVG_XG_PER_60 = 2.95
+N_SIMS_FULL = 105                      # Full season simulations
+N_SIMS_TODAY = 10294                   # Simulations per today's game
+# HOME_ICE_ADVANTAGE removed - now using actual home/away player stats from NST
+# Home advantage is built into the empirical performance differences between locations
+LEAGUE_AVG_XG_PER_60 = 3.10            # All-situations league average (updated from 2.95 for 5v5)
 OT_HOME_WIN_PROB = 0.55                # Historical: ~55% of OT/SO won by home team
-TEAM_STRENGTH_VARIANCE = 0.15          # ±9% game-to-game variance (injuries, form, etc.)
+TEAM_STRENGTH_VARIANCE = 0.15          # ±15% game-to-game variance (injuries, form, etc.)
+
+# Position weights for team strength calculations (must sum to 1.0)
+FORWARD_OFFENSE_WEIGHT = 0.85          # Forwards drive 85% of offense
+DEFENSE_OFFENSE_WEIGHT = 0.15          # Defensemen contribute 15% to offense
+FORWARD_DEFENSE_WEIGHT = 0.20          # Forwards contribute 20% to defense
+DEFENSE_DEFENSE_WEIGHT = 0.30          # Defensemen contribute 30% to defense
+GOALIE_DEFENSE_WEIGHT = 0.50           # Goalies contribute 50% to defense
 
 # =============================================================================
 # DATA FILTERS
@@ -39,10 +49,20 @@ FALLBACK_OFFENSIVE_RATING = 2.80       # xGF/60 if no data
 FALLBACK_DEFENSIVE_RATING = 2.80       # xGA/60 if no data
 
 # =============================================================================
-# RECENT FORM WEIGHTING
+# STAT WEIGHTING (must sum to 1.0)
 # =============================================================================
-RECENT_FORM_WEIGHT = 0.60  # 60% recent (last 10 games), 40% full season
-                           # Set to 0.5 for equal weight, 1.0 for recent only
+RECENT_FORM_WEIGHT = 0.55   # 55% recent (last 10 games)
+FULL_SEASON_WEIGHT = 0.30   # 30% current full season
+LAST_YEAR_WEIGHT = 0.15     # 15% last year's stats
+                            # Total = 1.0 (55% + 30% + 15%)
+
+# =============================================================================
+# EXPECTED GOALS vs ACTUAL GOALS BLENDING
+# =============================================================================
+ACTUAL_GOALS_WEIGHT = 0.30  # 30% actual goals (GF/60, GA/60, GAA)
+XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
+                            # Higher xG weight = more predictive, less reactive
+                            # Higher actual weight = rewards current performance
 
 # =============================================================================
 # DISPLAY SETTINGS
@@ -60,5 +80,28 @@ TEAM_ABBREV_FIXES = {
     "T.B": "Tampa Bay Lightning",
     "S.J": "San Jose Sharks",
 }
+
+# =============================================================================
+# VISUALIZATION SETTINGS
+# =============================================================================
+ENABLE_VISUALIZATIONS = True            # Master switch for chart generation
+VIZ_OUTPUT_DIR = "data/visualizations"  # Directory for saved charts
+VIZ_FORMAT = "png"                      # Output format: "png" or "pdf"
+VIZ_DPI = 300                           # Resolution (300 = print quality)
+
+# Chart dimensions (width, height in inches)
+TODAY_GAMES_FIGURE_SIZE = (16, 10)      # Game cards grid
+PLAYOFF_BAR_FIGURE_SIZE = (14, 12)      # Playoff probability bars
+CUP_BAR_FIGURE_SIZE = (12, 8)           # Cup probability bars
+HEATMAP_FIGURE_SIZE = (14, 16)          # Probability heatmap
+
+# Color schemes (hex colors)
+EAST_PRIMARY = "#1f77b4"                # Blue for Eastern Conference
+WEST_PRIMARY = "#d62728"                # Red for Western Conference
+
+# Chart-specific settings
+TODAY_GAMES_GRID_COLS = 2               # Columns for game cards (2 or 3)
+CUP_CHART_TOP_N = 20                    # Number of teams in Cup chart
+HEATMAP_COLORMAP = "Blues"              # Matplotlib colormap name
 
 print(f"Config loaded → Season {CURRENT_SEASON_FULL} | Today: {TODAY_PRETTY}")

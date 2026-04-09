@@ -10,7 +10,7 @@ DIVISIONS = {
     "Metropolitan": ["Carolina Hurricanes", "Columbus Blue Jackets", "New Jersey Devils", "New York Islanders",
                      "New York Rangers", "Philadelphia Flyers", "Pittsburgh Penguins", "Washington Capitals"],
     "Central": ["Chicago Blackhawks", "Colorado Avalanche", "Dallas Stars", "Minnesota Wild",
-                "Nashville Predators", "St. Louis Blues", "Utah Hockey Club", "Winnipeg Jets"],
+                "Nashville Predators", "St. Louis Blues", "Utah Mammoth", "Winnipeg Jets"],
     "Pacific": ["Anaheim Ducks", "Calgary Flames", "Edmonton Oilers", "Los Angeles Kings",
                 "San Jose Sharks", "Seattle Kraken", "Vancouver Canucks", "Vegas Golden Knights"]
 }
@@ -18,7 +18,13 @@ DIVISIONS = {
 
 def best_of_7(team1, team2, home_first, db_path):
     """
-    Simulate a best-of-7 playoff series.
+    Simulate a best-of-7 playoff series using NHL's 2-2-1-1-1 format.
+
+    NHL Home Ice Format:
+    - Games 1, 2: Higher seed at home
+    - Games 3, 4: Lower seed at home
+    - Games 5, 7: Higher seed at home
+    - Game 6: Lower seed at home
 
     Args:
         team1 (str): First team (typically higher seed)
@@ -30,12 +36,20 @@ def best_of_7(team1, team2, home_first, db_path):
         str: Winning team name
     """
     wins1 = wins2 = 0
-    home_turn = home_first
+    game_num = 0
+
+    # 2-2-1-1-1 format: Games at home for higher seed (if home_first=True)
+    # Game 1: home, Game 2: home, Game 3: away, Game 4: away,
+    # Game 5: home, Game 6: away, Game 7: home
+    home_pattern = [True, True, False, False, True, False, True]
 
     while wins1 < 4 and wins2 < 4:
+        # Determine home team based on 2-2-1-1-1 pattern
+        team1_at_home = home_pattern[game_num] if home_first else not home_pattern[game_num]
+
         winner = simulate_game(
-            team1 if home_turn else team2,
-            team2 if home_turn else team1,
+            team1 if team1_at_home else team2,
+            team2 if team1_at_home else team1,
             db_path
         )[0]
 
@@ -44,14 +58,21 @@ def best_of_7(team1, team2, home_first, db_path):
         else:
             wins2 += 1
 
-        home_turn = not home_turn
+        game_num += 1
 
     return team1 if wins1 == 4 else team2
 
 
 def simulate_playoffs(playoff_teams, final_standings, db_path):
     """
-    Simulate the full NHL playoff bracket (both conferences + Stanley Cup Final).
+    Simulate the full NHL playoff bracket using proper divisional format.
+
+    NHL Playoff Format (2013-present):
+    - Division winners get seeds 1-2 (by points)
+    - Division 2nd/3rd fill seeds 3-6
+    - Wildcards get seeds 7-8
+    - Round 1: Divisional matchups (1vWC2, 3v4, 2vWC1, 5v6)
+    - Rounds 2+: Divisional semifinals within each division bracket
 
     Args:
         playoff_teams (list): List of 16 playoff team names
@@ -59,72 +80,184 @@ def simulate_playoffs(playoff_teams, final_standings, db_path):
         db_path (str): Path to player database
 
     Returns:
-        dict: Dictionary with playoff results by round
-            {
-                'round1': [list of 8 teams that won round 1],
-                'round2': [list of 4 teams that won round 2],
-                'conf_finals': [list of 2 teams that won conference finals],
-                'cup_winner': team name or None
-            }
+        dict: Dictionary with playoff results by round, including matchup details
     """
     results = {
         'round1': [],
         'round2': [],
         'conf_finals': [],
-        'cup_winner': None
+        'cup_winner': None,
+        # Detailed matchup tracking for each round
+        'round1_matchups': {
+            'east': [],  # List of (team1, team2, winner) tuples
+            'west': []
+        },
+        'round2_matchups': {
+            'east': [],  # List of (team1, team2, winner) tuples
+            'west': []
+        },
+        'conf_finals_matchups': {
+            'east': None,  # (team1, team2, winner) tuple
+            'west': None
+        },
+        'cup_finals_matchup': None,  # (east_champ, west_champ, winner) tuple
+        'east_champ': None,
+        'west_champ': None
     }
-    
-    # Split into conferences
-    east = [t for t in playoff_teams if t in DIVISIONS["Atlantic"] + DIVISIONS["Metropolitan"]]
-    west = [t for t in playoff_teams if t in DIVISIONS["Central"] + DIVISIONS["Pacific"]]
 
-    # Sort by final standings position (higher seed = lower index)
-    east.sort(key=lambda x: final_standings[final_standings.team == x].index[0])
-    west.sort(key=lambda x: final_standings[final_standings.team == x].index[0])
+    def get_divisional_seeding(div1_name, div2_name, playoff_teams, final_standings):
+        """
+        Get proper NHL divisional seeding for a conference.
 
-    # ROUND 1 (8 teams -> 4 teams per conference)
-    if len(east) >= 2:
-        east_r1 = [best_of_7(east[i], east[i+1], home_first=True, db_path=db_path)
-                   for i in range(0, len(east), 2)]
-        results['round1'].extend(east_r1)
-        east = east_r1
-    
-    if len(west) >= 2:
-        west_r1 = [best_of_7(west[i], west[i+1], home_first=True, db_path=db_path)
-                   for i in range(0, len(west), 2)]
-        results['round1'].extend(west_r1)
-        west = west_r1
+        Returns:
+            tuple: (div1_teams, div2_teams, wildcards) where div1 has higher-points winner
+        """
+        # Get playoff teams from each division
+        div1_playoff = [t for t in playoff_teams if t in DIVISIONS[div1_name]]
+        div2_playoff = [t for t in playoff_teams if t in DIVISIONS[div2_name]]
 
-    # ROUND 2 (4 teams -> 2 teams per conference)
-    if len(east) >= 2:
-        east_r2 = [best_of_7(east[i], east[i+1], home_first=True, db_path=db_path)
-                   for i in range(0, len(east), 2)]
-        results['round2'].extend(east_r2)
-        east = east_r2
-    
-    if len(west) >= 2:
-        west_r2 = [best_of_7(west[i], west[i+1], home_first=True, db_path=db_path)
-                   for i in range(0, len(west), 2)]
-        results['round2'].extend(west_r2)
-        west = west_r2
+        # Sort by standings
+        div1_sorted = final_standings[final_standings.team.isin(div1_playoff)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+        div2_sorted = final_standings[final_standings.team.isin(div2_playoff)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
 
-    # CONFERENCE FINALS (2 teams -> 1 team per conference)
+        # Get division winners' points
+        div1_winner_pts = final_standings[final_standings.team == div1_sorted[0]].iloc[0]["points"] if div1_sorted else 0
+        div2_winner_pts = final_standings[final_standings.team == div2_sorted[0]].iloc[0]["points"] if div2_sorted else 0
+
+        # Identify top 3 from each division and wildcards
+        div1_top3 = div1_sorted[:3]
+        div2_top3 = div2_sorted[:3]
+
+        conf_teams = DIVISIONS[div1_name] + DIVISIONS[div2_name]
+        wildcards = [t for t in playoff_teams
+                     if t in conf_teams and t not in div1_top3 and t not in div2_top3]
+        wc_sorted = final_standings[final_standings.team.isin(wildcards)].sort_values(
+            by=["points", "row", "gf-ga", "gf"], ascending=False
+        ).team.tolist()
+
+        # Higher-points division winner's division becomes "Division 1"
+        if div1_winner_pts >= div2_winner_pts:
+            return div1_top3, div2_top3, wc_sorted
+        else:
+            return div2_top3, div1_top3, wc_sorted
+
+    # Get divisional seeding for each conference
+    east_div1, east_div2, east_wc = get_divisional_seeding(
+        "Atlantic", "Metropolitan", playoff_teams, final_standings
+    )
+    west_div1, west_div2, west_wc = get_divisional_seeding(
+        "Central", "Pacific", playoff_teams, final_standings
+    )
+
+    # ROUND 1 - Divisional format
+    # Div1: Winner vs WC2, 2nd vs 3rd
+    # Div2: Winner vs WC1, 2nd vs 3rd
+
+    east_r1 = []
+    if len(east_div1) >= 3 and len(east_wc) >= 2:
+        # Division 1 bracket
+        winner1 = best_of_7(east_div1[0], east_wc[1], home_first=True, db_path=db_path)  # Div1 winner vs WC2
+        east_r1.append(winner1)
+        results['round1_matchups']['east'].append((east_div1[0], east_wc[1], winner1))
+
+        winner2 = best_of_7(east_div1[1], east_div1[2], home_first=True, db_path=db_path)  # Div1: 2nd vs 3rd
+        east_r1.append(winner2)
+        results['round1_matchups']['east'].append((east_div1[1], east_div1[2], winner2))
+
+        # Division 2 bracket
+        winner3 = best_of_7(east_div2[0], east_wc[0], home_first=True, db_path=db_path)  # Div2 winner vs WC1
+        east_r1.append(winner3)
+        results['round1_matchups']['east'].append((east_div2[0], east_wc[0], winner3))
+
+        winner4 = best_of_7(east_div2[1], east_div2[2], home_first=True, db_path=db_path)  # Div2: 2nd vs 3rd
+        east_r1.append(winner4)
+        results['round1_matchups']['east'].append((east_div2[1], east_div2[2], winner4))
+
+    results['round1'].extend(east_r1)
+
+    west_r1 = []
+    if len(west_div1) >= 3 and len(west_wc) >= 2:
+        winner1 = best_of_7(west_div1[0], west_wc[1], home_first=True, db_path=db_path)
+        west_r1.append(winner1)
+        results['round1_matchups']['west'].append((west_div1[0], west_wc[1], winner1))
+
+        winner2 = best_of_7(west_div1[1], west_div1[2], home_first=True, db_path=db_path)
+        west_r1.append(winner2)
+        results['round1_matchups']['west'].append((west_div1[1], west_div1[2], winner2))
+
+        winner3 = best_of_7(west_div2[0], west_wc[0], home_first=True, db_path=db_path)
+        west_r1.append(winner3)
+        results['round1_matchups']['west'].append((west_div2[0], west_wc[0], winner3))
+
+        winner4 = best_of_7(west_div2[1], west_div2[2], home_first=True, db_path=db_path)
+        west_r1.append(winner4)
+        results['round1_matchups']['west'].append((west_div2[1], west_div2[2], winner4))
+
+    results['round1'].extend(west_r1)
+
+    # ROUND 2 - Divisional semifinals (winners within each division bracket)
+    # Div1 bracket winner vs Div1 bracket winner
+    # Div2 bracket winner vs Div2 bracket winner
+    east_r2 = []
+    if len(east_r1) >= 4:
+        # Sort within each division bracket by original standing
+        east_div1_r2 = sorted(east_r1[:2], key=lambda t: final_standings[final_standings.team == t].index[0])
+        east_div2_r2 = sorted(east_r1[2:], key=lambda t: final_standings[final_standings.team == t].index[0])
+
+        winner1 = best_of_7(east_div1_r2[0], east_div1_r2[1], home_first=True, db_path=db_path)
+        east_r2.append(winner1)
+        results['round2_matchups']['east'].append((east_div1_r2[0], east_div1_r2[1], winner1))
+
+        winner2 = best_of_7(east_div2_r2[0], east_div2_r2[1], home_first=True, db_path=db_path)
+        east_r2.append(winner2)
+        results['round2_matchups']['east'].append((east_div2_r2[0], east_div2_r2[1], winner2))
+
+    results['round2'].extend(east_r2)
+
+    west_r2 = []
+    if len(west_r1) >= 4:
+        west_div1_r2 = sorted(west_r1[:2], key=lambda t: final_standings[final_standings.team == t].index[0])
+        west_div2_r2 = sorted(west_r1[2:], key=lambda t: final_standings[final_standings.team == t].index[0])
+
+        winner1 = best_of_7(west_div1_r2[0], west_div1_r2[1], home_first=True, db_path=db_path)
+        west_r2.append(winner1)
+        results['round2_matchups']['west'].append((west_div1_r2[0], west_div1_r2[1], winner1))
+
+        winner2 = best_of_7(west_div2_r2[0], west_div2_r2[1], home_first=True, db_path=db_path)
+        west_r2.append(winner2)
+        results['round2_matchups']['west'].append((west_div2_r2[0], west_div2_r2[1], winner2))
+
+    results['round2'].extend(west_r2)
+
+    # CONFERENCE FINALS - Division bracket winners play each other
     east_champ = None
     west_champ = None
-    
-    if len(east) >= 2:
-        east_champ = best_of_7(east[0], east[1], home_first=True, db_path=db_path)
+
+    if len(east_r2) >= 2:
+        east_cf = sorted(east_r2, key=lambda t: final_standings[final_standings.team == t].index[0])
+        east_champ = best_of_7(east_cf[0], east_cf[1], home_first=True, db_path=db_path)
         results['conf_finals'].append(east_champ)
-    elif len(east) == 1:
-        east_champ = east[0]
+        results['conf_finals_matchups']['east'] = (east_cf[0], east_cf[1], east_champ)
+    elif len(east_r2) == 1:
+        east_champ = east_r2[0]
         results['conf_finals'].append(east_champ)
-    
-    if len(west) >= 2:
-        west_champ = best_of_7(west[0], west[1], home_first=True, db_path=db_path)
+
+    if len(west_r2) >= 2:
+        west_cf = sorted(west_r2, key=lambda t: final_standings[final_standings.team == t].index[0])
+        west_champ = best_of_7(west_cf[0], west_cf[1], home_first=True, db_path=db_path)
         results['conf_finals'].append(west_champ)
-    elif len(west) == 1:
-        west_champ = west[0]
+        results['conf_finals_matchups']['west'] = (west_cf[0], west_cf[1], west_champ)
+    elif len(west_r2) == 1:
+        west_champ = west_r2[0]
         results['conf_finals'].append(west_champ)
+
+    # Store conference champions
+    results['east_champ'] = east_champ
+    results['west_champ'] = west_champ
 
     # STANLEY CUP FINAL
     if east_champ and west_champ:
@@ -132,5 +265,6 @@ def simulate_playoffs(playoff_teams, final_standings, db_path):
                      final_standings[final_standings.team == west_champ].index[0]
         cup_winner = best_of_7(east_champ, west_champ, home_first, db_path)
         results['cup_winner'] = cup_winner
+        results['cup_finals_matchup'] = (east_champ, west_champ, cup_winner)
 
     return results

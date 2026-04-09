@@ -7,7 +7,8 @@ from config import *
 from nhl_schedule import scrape_schedule, get_todays_games
 from nhl_rosters import download_nst_data
 from game_simulation import predict_todays_games
-from season_simulation import build_current_standings, simulate_full_season
+from season_simulation import build_current_standings, simulate_full_season, display_playoff_matchups
+from visualization import generate_all_visualizations
 
 # Header
 print("=" * 100)
@@ -43,11 +44,24 @@ if SHOW_TODAYS_GAMES:
             print(f"   → Favorite: {pred['favorite']} | Expected Total: ~{pred['expected_total']}")
             print("-" * 60)
 
+        # Generate today's games visualization
+        if ENABLE_VISUALIZATIONS:
+            viz_paths = generate_all_visualizations(
+                today_predictions=predictions,
+                n_sims_today=N_SIMS_TODAY,
+                date_str=TODAY_PRETTY
+            )
+            if viz_paths.get('today_games'):
+                print(f"   Today's games chart saved → {viz_paths['today_games']}\n")
+
     print("=" * 88 + "\n")
 
 # Step 5: Full season Monte Carlo simulations
 start_time = time.time()
-playoff_counter, round1_counter, round2_counter, conf_finals_counter, cup_counter, pres_counter = simulate_full_season(
+(playoff_counter, round1_counter, round2_counter, conf_finals_counter,
+ cup_counter, pres_counter, seeding_counter, matchup_counter,
+ round2_matchup_counter, conf_finals_matchup_counter,
+ cup_finals_matchup_counter, bracket_path_counter) = simulate_full_season(
     schedule,
     current_standings,
     N_SIMS_FULL,
@@ -68,10 +82,24 @@ for team in all_teams:
         "Conf Finals %": f"{round2_counter[team]/N_SIMS_FULL:.1%}",
         "Finals %": f"{conf_finals_counter[team]/N_SIMS_FULL:.1%}",
         "Stanley Cup %": f"{cup_counter[team]/N_SIMS_FULL:.1%}",
-        "President's Trophy %": f"{pres_counter[team]/N_SIMS_FULL:.1%}"
+        "President's Trophy %": f"{pres_counter[team]/N_SIMS_FULL:.1%}",
+        "_cup": cup_counter[team]/N_SIMS_FULL,
+        "_playoff": playoff_counter[team]/N_SIMS_FULL
     })
 
-final_df = pd.DataFrame(results).sort_values("Playoff %", ascending=False)
+final_df = pd.DataFrame(results).sort_values(
+    ["_playoff", "_cup"],
+    ascending=False
+).drop(columns=["_cup", "_playoff"])
+
+# Display playoff seedings and matchups for all rounds
+display_playoff_matchups(
+    seeding_counter, matchup_counter, N_SIMS_FULL,
+    round2_matchup_counter=round2_matchup_counter,
+    conf_finals_matchup_counter=conf_finals_matchup_counter,
+    cup_finals_matchup_counter=cup_finals_matchup_counter,
+    bracket_path_counter=bracket_path_counter
+)
 
 print("\n" + "=" * 120)
 print(f"NHL {CURRENT_SEASON_FULL} FINAL RESULTS — {N_SIMS_FULL:,} sims in {elapsed:.0f}s".center(120))
@@ -79,6 +107,26 @@ print("=" * 120)
 print(final_df.to_string(index=False))
 print(f"\nResults saved → {PREDICTIONS_CSV}")
 final_df.to_csv(PREDICTIONS_CSV, index=False)
+
+# Generate all probability visualizations
+if ENABLE_VISUALIZATIONS:
+    # Convert percentage strings back to floats for visualization
+    viz_df = final_df.copy()
+    percentage_cols = ["Playoff %", "Round 2 %", "Conf Finals %",
+                       "Finals %", "Stanley Cup %", "President's Trophy %"]
+    for col in percentage_cols:
+        viz_df[col] = viz_df[col].str.rstrip('%').astype(float) / 100
+
+    viz_paths = generate_all_visualizations(
+        results_df=viz_df,
+        n_sims_full=N_SIMS_FULL,
+        date_str=TODAY_PRETTY
+    )
+
+    print("\nVisualizations saved:")
+    for chart_type, path in viz_paths.items():
+        if path and chart_type != 'today_games':  # Don't duplicate today's games message
+            print(f"  - {chart_type}: {path}")
 
 if SHOW_ROSTER_DUMP:
     from nhl_rosters import view_team_rosters
