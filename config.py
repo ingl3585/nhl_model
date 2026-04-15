@@ -26,8 +26,8 @@ PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 # =============================================================================
 # SIMULATION SETTINGS
 # =============================================================================
-N_SIMS_FULL = 105                      # Full season simulations
-N_SIMS_TODAY = 10294                   # Simulations per today's game
+N_SIMS_FULL = 1001                     # Full season simulations
+N_SIMS_TODAY = 100001                  # Simulations per today's game
 # HOME_ICE_ADVANTAGE removed - now using actual home/away player stats from NST
 # Home advantage is built into the empirical performance differences between locations
 LEAGUE_AVG_XG_PER_60 = 3.10            # All-situations league average (updated from 2.95 for 5v5)
@@ -47,11 +47,15 @@ GOALIE_DEFENSE_WEIGHT = 0.50           # Goalies contribute 50% to defense
 MIN_TOI_MINUTES = 20                   # Players must have >60 min 5v5 TOI
 FALLBACK_OFFENSIVE_RATING = 2.80       # xGF/60 if no data
 FALLBACK_DEFENSIVE_RATING = 2.80       # xGA/60 if no data
+RECENT_GAMES_TGP = 25                  # Recent games window for "last N games" stats (e.g. 10, 25)
+ACTIVE_ROSTER_WINDOW = 10             # Games window for active roster determination
+ACTIVE_ROSTER_MIN_GP_PCT = 0.50       # Min fraction of window games to be considered active (e.g. 5/10)
+MIN_GP_PERCENTAGE = 0.50               # Skaters must have played >= this fraction of full-season games (0 = off)
 
 # =============================================================================
 # STAT WEIGHTING (must sum to 1.0)
 # =============================================================================
-RECENT_FORM_WEIGHT = 0.55   # 55% recent (last 10 games)
+RECENT_FORM_WEIGHT = 0.55   # 55% recent (last X games)
 FULL_SEASON_WEIGHT = 0.30   # 30% current full season
 LAST_YEAR_WEIGHT = 0.15     # 15% last year's stats
                             # Total = 1.0 (55% + 30% + 15%)
@@ -68,7 +72,7 @@ XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
 # DISPLAY SETTINGS
 # =============================================================================
 SHOW_TODAYS_GAMES = True
-SHOW_ROSTER_DUMP = False               # Set True if you want full roster print
+SHOW_ROSTER_DUMP = True               # Set True if you want full roster print
 SHOW_PROGRESS_EVERY = 2000             # Print progress every N sims
 
 # =============================================================================

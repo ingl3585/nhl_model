@@ -15,7 +15,8 @@ from selenium.webdriver.common.by import By
 
 from config import (
     TEAM_ABBREV_FIXES, MIN_TOI_MINUTES, RECENT_FORM_WEIGHT,
-    FULL_SEASON_WEIGHT, LAST_YEAR_WEIGHT, SHOW_ROSTER_DUMP
+    FULL_SEASON_WEIGHT, LAST_YEAR_WEIGHT, SHOW_ROSTER_DUMP, RECENT_GAMES_TGP,
+    MIN_GP_PERCENTAGE, ACTIVE_ROSTER_WINDOW, ACTIVE_ROSTER_MIN_GP_PCT
 )
 
 # Team mappings (consistent with schedule module)
@@ -157,7 +158,7 @@ def merge_and_weight_stats(full_df, recent_df, last_year_df=None,
 
     Args:
         full_df (pd.DataFrame): Current season full stats
-        recent_df (pd.DataFrame): Current season last 10 games stats
+        recent_df (pd.DataFrame): Current season last 25 games stats
         last_year_df (pd.DataFrame): Last year's full season stats (optional)
         recent_weight (float): Weight for recent stats (default 0.55)
         full_weight (float): Weight for current full season (default 0.30)
@@ -367,7 +368,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
 
     Args:
         db_path (str): Path to SQLite database file
-        recent_weight (float): Weight for last 10 games, uses RECENT_FORM_WEIGHT from config if None
+        recent_weight (float): Weight for last N games (RECENT_GAMES_TGP), uses RECENT_FORM_WEIGHT from config if None
         full_weight (float): Weight for current full season, uses FULL_SEASON_WEIGHT from config if None
         last_year_weight (float): Weight for last year, uses LAST_YEAR_WEIGHT from config if None
 
@@ -393,7 +394,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
             return df
 
     print(f"Downloading live 2025-26 player stats from Natural Stat Trick...")
-    print(f"   Weighting: {recent_weight:.0%} recent (L10) + {full_weight:.0%} full season + {last_year_weight:.0%} last year")
+    print(f"   Weighting: {recent_weight:.0%} recent (L{RECENT_GAMES_TGP}) + {full_weight:.0%} full season + {last_year_weight:.0%} last year")
 
     driver = create_nst_driver()
 
@@ -403,20 +404,20 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     # URLs for CURRENT SEASON (2025-26) - HOME
     skaters_full_home_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="H", gpfilt="none", tgp="410")
     goalies_full_home_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="H", gpfilt="none", tgp="410")
-    skaters_recent_home_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="H", gpfilt="gpteam", tgp="10")
-    goalies_recent_home_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="H", gpfilt="gpteam", tgp="10")
+    skaters_recent_home_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="H", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
+    goalies_recent_home_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="H", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
 
     # URLs for CURRENT SEASON (2025-26) - AWAY
     skaters_full_away_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="A", gpfilt="none", tgp="410")
     goalies_full_away_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="A", gpfilt="none", tgp="410")
-    skaters_recent_away_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="A", gpfilt="gpteam", tgp="10")
-    goalies_recent_away_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="A", gpfilt="gpteam", tgp="10")
+    skaters_recent_away_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="A", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
+    goalies_recent_away_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="A", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
 
     # URLs for active roster identification
-    # Skaters: last game (tgp=1) - large rosters so one game captures most players
-    # Goalies: last 10 games (tgp=10) - need L10 to capture both starter AND backup goalies
-    skaters_last_game_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="B", gpfilt="gpteam", tgp="1")
-    goalies_active_roster_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="B", gpfilt="gpteam", tgp="10")
+    # Skaters: last ACTIVE_ROSTER_WINDOW games — players with >=50% GP are considered active & on correct team
+    # Goalies: last RECENT_GAMES_TGP games — need wider window to capture starter AND backup
+    skaters_last_game_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="B", gpfilt="gpteam", tgp=ACTIVE_ROSTER_WINDOW)
+    goalies_active_roster_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="B", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
 
     # URLs for LAST YEAR (2024-25) - HOME
     skaters_lastyear_home_url = base_url_template.format(season="20242025", stdoi="oi", pos="S", loc="H", gpfilt="none", tgp="410")
@@ -430,22 +431,22 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     print("   Downloading HOME stats...")
     skaters_full_home = download_nst_stats(skaters_full_home_url, driver, "Full season skaters HOME (2025-26)")
     goalies_full_home = download_nst_stats(goalies_full_home_url, driver, "Full season goalies HOME (2025-26)")
-    skaters_recent_home = download_nst_stats(skaters_recent_home_url, driver, "Last 10 games skaters HOME (2025-26)")
-    goalies_recent_home = download_nst_stats(goalies_recent_home_url, driver, "Last 10 games goalies HOME (2025-26)")
+    skaters_recent_home = download_nst_stats(skaters_recent_home_url, driver, f"Last {RECENT_GAMES_TGP} games skaters HOME (2025-26)")
+    goalies_recent_home = download_nst_stats(goalies_recent_home_url, driver, f"Last {RECENT_GAMES_TGP} games goalies HOME (2025-26)")
 
     # Download current season AWAY datasets
     print("   Downloading AWAY stats...")
     skaters_full_away = download_nst_stats(skaters_full_away_url, driver, "Full season skaters AWAY (2025-26)")
     goalies_full_away = download_nst_stats(goalies_full_away_url, driver, "Full season goalies AWAY (2025-26)")
-    skaters_recent_away = download_nst_stats(skaters_recent_away_url, driver, "Last 10 games skaters AWAY (2025-26)")
-    goalies_recent_away = download_nst_stats(goalies_recent_away_url, driver, "Last 10 games goalies AWAY (2025-26)")
+    skaters_recent_away = download_nst_stats(skaters_recent_away_url, driver, f"Last {RECENT_GAMES_TGP} games skaters AWAY (2025-26)")
+    goalies_recent_away = download_nst_stats(goalies_recent_away_url, driver, f"Last {RECENT_GAMES_TGP} games goalies AWAY (2025-26)")
 
     # Download active roster data for injury/trade filtering
     # Skaters: last game captures most of the roster
-    # Goalies: L10 needed to capture both starter and backup (only 1-2 goalies play per game)
+    # Goalies: last N games (RECENT_GAMES_TGP) needed to capture both starter and backup (only 1-2 goalies play per game)
     print("   Downloading active roster data (injury/trade filter)...")
-    skaters_last_game = download_nst_stats(skaters_last_game_url, driver, "Last game skaters roster")
-    goalies_active = download_nst_stats(goalies_active_roster_url, driver, "Last 10 games goalies roster (captures backups)")
+    skaters_last_game = download_nst_stats(skaters_last_game_url, driver, f"Active roster skaters (L{ACTIVE_ROSTER_WINDOW}, ≥{ACTIVE_ROSTER_MIN_GP_PCT:.0%} GP)")
+    goalies_active = download_nst_stats(goalies_active_roster_url, driver, f"Last {RECENT_GAMES_TGP} games goalies roster (captures backups)")
 
     # Download last year's datasets (if enabled)
     skaters_lastyear_home = pd.DataFrame()
@@ -492,45 +493,49 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     # Player_ID is just NST's row number and differs between datasets (home vs away vs last game)
     active_players_list = []
 
-    if not skaters_last_game.empty:
-        skaters_last_game_filtered = skaters_last_game.copy()
-        print(f"   → Last game roster: {len(skaters_last_game_filtered)} skaters")
+    # Build active roster: players with >= ACTIVE_ROSTER_MIN_GP_PCT of last ACTIVE_ROSTER_WINDOW games
+    # NST gpfilt=gpteam anchors to the player's CURRENT team, so traded players appear under their new
+    # team once they've accumulated enough games there — no multi-team string parsing needed.
+    min_active_gp = round(ACTIVE_ROSTER_WINDOW * ACTIVE_ROSTER_MIN_GP_PCT)
+    current_team_map = {}
 
-        # Clean team names
-        skaters_last_game_filtered["Team"] = skaters_last_game_filtered["Team"].apply(clean_team_name)
+    if not skaters_last_game.empty and "Player" in skaters_last_game.columns:
+        skaters_last_game["Team"] = skaters_last_game["Team"].apply(clean_team_name)
 
-        # Update team assignments for traded players in ALL datasets
-        if "Player" in skaters_last_game_filtered.columns:
-            current_team_map = dict(zip(skaters_last_game_filtered["Player"], skaters_last_game_filtered["Team"]))
+        # Find GP column
+        gp_col = "GP" if "GP" in skaters_last_game.columns else \
+                 "Games Played" if "Games Played" in skaters_last_game.columns else None
 
-            def update_team(row):
-                if row["Player"] in current_team_map:
-                    return current_team_map[row["Player"]]
-                else:
-                    return clean_team_name(row["Team"])
+        if gp_col:
+            gp_vals = pd.to_numeric(skaters_last_game[gp_col], errors="coerce").fillna(0)
+            before = len(skaters_last_game)
+            skaters_last_game = skaters_last_game[gp_vals >= min_active_gp].copy()
+            print(f"   → Active roster: {len(skaters_last_game)}/{before} skaters with {min_active_gp}+ GP in last {ACTIVE_ROSTER_WINDOW} games")
+        else:
+            print(f"   → Active roster: {len(skaters_last_game)} skaters (no GP column found, no threshold applied)")
 
-            # Update HOME datasets
-            if not skaters_full_home.empty:
-                skaters_full_home["Team"] = skaters_full_home.apply(update_team, axis=1)
-            if not skaters_recent_home.empty and "Player" in skaters_recent_home.columns:
-                skaters_recent_home["Team"] = skaters_recent_home.apply(update_team, axis=1)
-
-            # Update AWAY datasets
-            if not skaters_full_away.empty:
-                skaters_full_away["Team"] = skaters_full_away.apply(update_team, axis=1)
-            if not skaters_recent_away.empty and "Player" in skaters_recent_away.columns:
-                skaters_recent_away["Team"] = skaters_recent_away.apply(update_team, axis=1)
-
-        # Track active skaters using (Player, Team, Position) for reliable matching
-        active_skaters = skaters_last_game_filtered[["Player", "Team", "Position"]].copy()
+        current_team_map = dict(zip(skaters_last_game["Player"], skaters_last_game["Team"]))
+        active_skaters = skaters_last_game[["Player", "Team", "Position"]].copy()
         active_players_list.append(active_skaters)
-        print(f"   ✓ Identified {len(active_skaters)} active skaters from last game")
 
-    # Same for goalies - use L10 to capture both starter and backup
+    def update_team(row):
+        if row["Player"] in current_team_map:
+            return current_team_map[row["Player"]]
+        raw = str(row["Team"]) if pd.notna(row["Team"]) else ""
+        if ',' in raw or '/' in raw:
+            print(f"   ⚠ Could not resolve current team for {row['Player']} (NST: {raw}) — using alphabetical fallback")
+        return clean_team_name(row["Team"])
+
+    # Apply current team to all datasets
+    for df in [skaters_full_home, skaters_full_away, skaters_recent_home, skaters_recent_away]:
+        if not df.empty and "Player" in df.columns:
+            df["Team"] = df.apply(update_team, axis=1)
+
+    # Same for goalies - use last N games (RECENT_GAMES_TGP) to capture both starter and backup
     if not goalies_active.empty:
         goalies_active['Position'] = 'G'
         goalies_active["Team"] = goalies_active["Team"].apply(clean_team_name)
-        print(f"   → Active goalies (L10): {len(goalies_active)} goalies")
+        print(f"   → Active goalies (L{RECENT_GAMES_TGP}): {len(goalies_active)} goalies")
 
         # Update team assignments for traded goalies
         if "Player" in goalies_active.columns:
@@ -554,7 +559,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
         # Track active goalies using (Player, Team, Position) for reliable matching
         active_goalies = goalies_active[["Player", "Team", "Position"]].copy()
         active_players_list.append(active_goalies)
-        print(f"   ✓ Identified {len(active_goalies)} active goalies from L10 (includes backups)")
+        print(f"   ✓ Identified {len(active_goalies)} active goalies from L{RECENT_GAMES_TGP} (includes backups)")
 
     # Merge and weight stats separately for HOME and AWAY
     print("   Merging and weighting HOME stats...")
@@ -646,6 +651,22 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     # Don't fill missing home/away data - let NaN values remain for players who truly
     # don't have stats at a given location. Team strength calculations will handle this.
 
+    # Consolidate GP_home_dup / GP_away_dup into a single total GP column
+    for df in [skaters_combined, goalies_combined]:
+        if "GP_home_dup" in df.columns or "GP_away_dup" in df.columns:
+            gp_home = df["GP_home_dup"].fillna(0) if "GP_home_dup" in df.columns else 0
+            gp_away = df["GP_away_dup"].fillna(0) if "GP_away_dup" in df.columns else 0
+            df["GP"] = gp_home + gp_away
+            df.drop(columns=[c for c in ["GP_home_dup", "GP_away_dup"] if c in df.columns], inplace=True)
+
+    # Apply GP% filter to skaters only (goalies play fewer games by design — filter separately via TOI)
+    if MIN_GP_PERCENTAGE > 0 and not skaters_combined.empty and "GP" in skaters_combined.columns:
+        team_max_gp = skaters_combined.groupby("Team")["GP"].transform("max")
+        min_gp = team_max_gp * MIN_GP_PERCENTAGE
+        before = len(skaters_combined)
+        skaters_combined = skaters_combined[skaters_combined["GP"] >= min_gp].copy()
+        print(f"   → GP filter ({MIN_GP_PERCENTAGE:.0%} of team games): removed {before - len(skaters_combined)} skaters, kept {len(skaters_combined)}")
+
     # Combine skaters and goalies
     all_players = pd.concat([skaters_combined, goalies_combined], ignore_index=True, sort=False)
 
@@ -684,17 +705,10 @@ def view_team_rosters(db_path, min_toi=None):
     try:
         conn = sqlite3.connect(db_path)
         df = pd.read_sql("SELECT * FROM players", conn)
-
-        # Check if active_roster table exists
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='active_roster'")
-        has_active_roster = cursor.fetchone() is not None
-
-        active_roster_df = None
-        if has_active_roster:
-            # Active roster now uses (Player, Team, Position) instead of Player_ID
-            active_roster_df = pd.read_sql("SELECT Player, Team, Position FROM active_roster", conn)
-
+        active_roster_df = pd.read_sql("SELECT Player, Team, Position FROM active_roster", conn) \
+            if cursor.fetchone() else None
         conn.close()
     except Exception as e:
         print(f"   ✗ Could not load player data: {e}")
@@ -705,20 +719,15 @@ def view_team_rosters(db_path, min_toi=None):
         return
 
     print("\n" + "=" * 140)
-    print("PLAYER STATS BY TEAM - HOME/AWAY SPLITS (70% xG + 30% Actual Goals, 55% Recent L10 + 30% Full Season + 15% Last Year)")
+    print(f"PLAYER STATS BY TEAM - HOME/AWAY SPLITS (70% xG + 30% Actual Goals, 55% Recent L{RECENT_GAMES_TGP} + 30% Full Season + 15% Last Year)")
     print("=" * 140)
 
-    # Group by team
     for team in sorted(df["Team"].unique()):
         team_players = df[df["Team"] == team].copy()
 
-        # Filter to active roster only using (Player, Team, Position) matching
-        if has_active_roster and active_roster_df is not None:
-            # Merge to find active players - keep only rows that match active roster
+        if active_roster_df is not None:
             team_players = team_players.merge(
-                active_roster_df,
-                on=["Player", "Team", "Position"],
-                how="inner"
+                active_roster_df, on=["Player", "Team", "Position"], how="inner"
             )
 
         if team_players.empty:
