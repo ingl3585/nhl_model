@@ -78,7 +78,7 @@ def create_nst_driver():
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    driver = uc.Chrome(options=options, headless=False)
+    driver = uc.Chrome(options=options, headless=False, version_main=147)
 
     # Route all downloads to our temp dir (no prompt, no browser download bar)
     driver.execute_cdp_cmd("Page.setDownloadBehavior", {

@@ -16,35 +16,36 @@ DIVISIONS = {
 }
 
 
-def best_of_7(team1, team2, home_first, db_path):
+def best_of_7(team1, team2, home_first, db_path,
+              starting_wins=(0, 0), starting_game=0):
     """
     Simulate a best-of-7 playoff series using NHL's 2-2-1-1-1 format.
-
-    NHL Home Ice Format:
-    - Games 1, 2: Higher seed at home
-    - Games 3, 4: Lower seed at home
-    - Games 5, 7: Higher seed at home
-    - Game 6: Lower seed at home
+    Optionally resume from a partially-played state.
 
     Args:
-        team1 (str): First team (typically higher seed)
+        team1 (str): First team (higher seed by convention)
         team2 (str): Second team
-        home_first (bool): Whether team1 has home ice advantage
+        home_first (bool): Whether team1 had home ice in Game 1
         db_path (str): Path to player database
+        starting_wins (tuple): (wins1, wins2) — current series score
+        starting_game (int): Number of games already played (resumes Game N+1)
 
     Returns:
         str: Winning team name
     """
-    wins1 = wins2 = 0
-    game_num = 0
+    wins1, wins2 = starting_wins
+    game_num = starting_game
 
-    # 2-2-1-1-1 format: Games at home for higher seed (if home_first=True)
-    # Game 1: home, Game 2: home, Game 3: away, Game 4: away,
-    # Game 5: home, Game 6: away, Game 7: home
+    # 2-2-1-1-1 home pattern for the team with home-ice (team1 if home_first=True)
     home_pattern = [True, True, False, False, True, False, True]
 
+    # Defensive: if state already says someone won, return them
+    if wins1 >= 4:
+        return team1
+    if wins2 >= 4:
+        return team2
+
     while wins1 < 4 and wins2 < 4:
-        # Determine home team based on 2-2-1-1-1 pattern
         team1_at_home = home_pattern[game_num] if home_first else not home_pattern[game_num]
 
         winner = simulate_game(
@@ -61,6 +62,30 @@ def best_of_7(team1, team2, home_first, db_path):
         game_num += 1
 
     return team1 if wins1 == 4 else team2
+
+
+def _resolve_series(slot, playoff_state, fallback_team1, fallback_team2,
+                    fallback_home_first, db_path):
+    """
+    Return the winner of a series slot.
+
+    If the slot has known state (completed or in progress), use it.
+    Otherwise fall back to a fresh best-of-7 between the two passed teams.
+    """
+    s = playoff_state['series'].get(slot) if playoff_state else None
+    if s is None:
+        # Future series with no recorded state yet — fresh sim
+        return best_of_7(fallback_team1, fallback_team2, fallback_home_first, db_path)
+
+    if s['completed']:
+        return s['winner']
+
+    # In-progress series: resume from current score
+    return best_of_7(
+        s['team1'], s['team2'], s['home_first'], db_path,
+        starting_wins=(s['wins1'], s['wins2']),
+        starting_game=s['games_played'],
+    )
 
 
 def simulate_playoffs(playoff_teams, final_standings, db_path):
@@ -266,5 +291,112 @@ def simulate_playoffs(playoff_teams, final_standings, db_path):
         cup_winner = best_of_7(east_champ, west_champ, home_first, db_path)
         results['cup_winner'] = cup_winner
         results['cup_finals_matchup'] = (east_champ, west_champ, cup_winner)
+
+    return results
+
+
+def _seed_priority(team, final_standings):
+    rows = final_standings.index[final_standings.team == team]
+    return rows[0] if len(rows) else 999
+
+
+def simulate_playoffs_from_state(playoff_state, final_standings, db_path):
+    """
+    Simulate the bracket starting from the current real-world state.
+
+    For each slot:
+      - completed → lock in the actual winner
+      - in progress → resume best_of_7 from current score
+      - future (no state yet) → fresh best_of_7 between upstream winners
+
+    Args:
+        playoff_state (dict): output of playoff_state.build_playoff_state()
+        final_standings (pd.DataFrame): final regular-season standings
+        db_path (str): path to player database
+
+    Returns:
+        dict: same shape as simulate_playoffs() result
+    """
+    results = {
+        'round1': [], 'round2': [], 'conf_finals': [], 'cup_winner': None,
+        'round1_matchups': {'east': [], 'west': []},
+        'round2_matchups': {'east': [], 'west': []},
+        'conf_finals_matchups': {'east': None, 'west': None},
+        'cup_finals_matchup': None,
+        'east_champ': None, 'west_champ': None,
+    }
+
+    series = playoff_state['series']
+
+    def resolve(slot, fallback_t1=None, fallback_t2=None, fallback_home_first=True):
+        s = series.get(slot)
+        if s is None:
+            # Future series — pair upstream winners (resolved already)
+            return best_of_7(fallback_t1, fallback_t2, fallback_home_first, db_path), \
+                   (fallback_t1, fallback_t2)
+        if s['completed']:
+            return s['winner'], (s['team1'], s['team2'])
+        winner = best_of_7(
+            s['team1'], s['team2'], s['home_first'], db_path,
+            starting_wins=(s['wins1'], s['wins2']),
+            starting_game=s['games_played'],
+        )
+        return winner, (s['team1'], s['team2'])
+
+    # ROUND 1
+    r1_winners = {}
+    for conf in ('east', 'west'):
+        for div in ('div1', 'div2'):
+            for half in ('top', 'bot'):
+                slot = f"R1_{conf}_{div}_{half}"
+                winner, (t1, t2) = resolve(slot)
+                r1_winners[slot] = winner
+                results['round1'].append(winner)
+                results['round1_matchups'][conf].append((t1, t2, winner))
+
+    # ROUND 2 — pair top/bot winners within each div bracket
+    r2_winners = {}
+    for conf in ('east', 'west'):
+        for div in ('div1', 'div2'):
+            top_w = r1_winners[f"R1_{conf}_{div}_top"]
+            bot_w = r1_winners[f"R1_{conf}_{div}_bot"]
+            # Higher seed (lower standings index) gets home ice
+            if _seed_priority(top_w, final_standings) <= _seed_priority(bot_w, final_standings):
+                fb_t1, fb_t2 = top_w, bot_w
+            else:
+                fb_t1, fb_t2 = bot_w, top_w
+            slot = f"R2_{conf}_{div}"
+            winner, (t1, t2) = resolve(slot, fb_t1, fb_t2, True)
+            r2_winners[slot] = winner
+            results['round2'].append(winner)
+            results['round2_matchups'][conf].append((t1, t2, winner))
+
+    # CONFERENCE FINALS
+    cf_winners = {}
+    for conf in ('east', 'west'):
+        d1_w = r2_winners[f"R2_{conf}_div1"]
+        d2_w = r2_winners[f"R2_{conf}_div2"]
+        if _seed_priority(d1_w, final_standings) <= _seed_priority(d2_w, final_standings):
+            fb_t1, fb_t2 = d1_w, d2_w
+        else:
+            fb_t1, fb_t2 = d2_w, d1_w
+        slot = f"CF_{conf}"
+        winner, (t1, t2) = resolve(slot, fb_t1, fb_t2, True)
+        cf_winners[conf] = winner
+        results['conf_finals'].append(winner)
+        results['conf_finals_matchups'][conf] = (t1, t2, winner)
+
+    results['east_champ'] = cf_winners['east']
+    results['west_champ'] = cf_winners['west']
+
+    # STANLEY CUP FINAL — east vs west
+    e, w = cf_winners['east'], cf_winners['west']
+    if _seed_priority(e, final_standings) <= _seed_priority(w, final_standings):
+        fb_t1, fb_t2 = e, w
+    else:
+        fb_t1, fb_t2 = w, e
+    cup_winner, (t1, t2) = resolve('SCF', fb_t1, fb_t2, True)
+    results['cup_winner'] = cup_winner
+    results['cup_finals_matchup'] = (t1, t2, cup_winner)
 
     return results

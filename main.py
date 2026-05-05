@@ -7,7 +7,11 @@ from config import *
 from nhl_schedule import scrape_schedule, get_todays_games
 from nhl_rosters import download_nst_data
 from game_simulation import predict_todays_games
-from season_simulation import build_current_standings, simulate_full_season, display_playoff_matchups
+from season_simulation import (
+    build_current_standings, simulate_full_season,
+    simulate_playoffs_only, display_playoff_matchups, DIVISIONS
+)
+from playoff_state import build_playoff_state, describe_state, round_status as compute_round_status
 from visualization import generate_all_visualizations
 
 # Header
@@ -16,11 +20,14 @@ print(f"NHL MONTE CARLO PRO — {CURRENT_SEASON_FULL} SEASON".center(100))
 print(f"Live 5v5 xGF/xGA model | {N_SIMS_FULL:,} simulations | Today: {TODAY_PRETTY}".center(100))
 print("=" * 100)
 
-# Step 1: Scrape schedule
-schedule = scrape_schedule(output_path=SCHEDULE_CSV)
+# Step 1: Scrape schedule (regular + playoffs)
+schedule, playoff_games = scrape_schedule(output_path=SCHEDULE_CSV)
 
-# Step 2: Build current standings
+# Step 2: Build current standings (from regular season only)
 current_standings = build_current_standings(schedule)
+
+# Detect playoff mode: playoff games exist AND regular season is fully played
+playoff_mode = (not playoff_games.empty) and (~schedule.played).sum() == 0
 
 # Step 3: Download player data
 download_nst_data(DB_FILE, recent_weight=RECENT_FORM_WEIGHT)
@@ -31,7 +38,8 @@ if SHOW_TODAYS_GAMES:
     print(f"TODAY'S NHL GAMES — {TODAY_PRETTY} — LIVE MODEL ODDS ({N_SIMS_TODAY:,} sims each)")
     print("=" * 88)
 
-    today_games = get_todays_games(schedule, TODAY_STR)
+    today_source = playoff_games if playoff_mode else schedule
+    today_games = get_todays_games(today_source, TODAY_STR)
 
     if today_games.empty:
         print("   No games scheduled today.\n")
@@ -56,18 +64,39 @@ if SHOW_TODAYS_GAMES:
 
     print("=" * 88 + "\n")
 
-# Step 5: Full season Monte Carlo simulations
+# Step 5: Monte Carlo — either full season or playoffs-from-state
 start_time = time.time()
-(playoff_counter, round1_counter, round2_counter, conf_finals_counter,
- cup_counter, pres_counter, seeding_counter, matchup_counter,
- round2_matchup_counter, conf_finals_matchup_counter,
- cup_finals_matchup_counter, bracket_path_counter) = simulate_full_season(
-    schedule,
-    current_standings,
-    N_SIMS_FULL,
-    DB_FILE,
-    show_progress_every=SHOW_PROGRESS_EVERY
-)
+
+playoff_state = None
+round_status = None
+
+if playoff_mode:
+    # Build standings index in playoff seeding order so seed-priority lookups work
+    final_standings = current_standings.sort_values(
+        by=["points", "row", "gf-ga", "gf"], ascending=False
+    ).reset_index(drop=True)
+
+    playoff_state = build_playoff_state(playoff_games, final_standings, DIVISIONS)
+    round_status = compute_round_status(playoff_state)
+
+    (playoff_counter, round1_counter, round2_counter, conf_finals_counter,
+     cup_counter, pres_counter, seeding_counter, matchup_counter,
+     round2_matchup_counter, conf_finals_matchup_counter,
+     cup_finals_matchup_counter, bracket_path_counter) = simulate_playoffs_only(
+        playoff_state, final_standings, N_SIMS_FULL, DB_FILE
+    )
+else:
+    (playoff_counter, round1_counter, round2_counter, conf_finals_counter,
+     cup_counter, pres_counter, seeding_counter, matchup_counter,
+     round2_matchup_counter, conf_finals_matchup_counter,
+     cup_finals_matchup_counter, bracket_path_counter) = simulate_full_season(
+        schedule,
+        current_standings,
+        N_SIMS_FULL,
+        DB_FILE,
+        show_progress_every=SHOW_PROGRESS_EVERY
+    )
+
 elapsed = time.time() - start_time
 
 # Step 6: Generate and display results
@@ -98,7 +127,8 @@ display_playoff_matchups(
     round2_matchup_counter=round2_matchup_counter,
     conf_finals_matchup_counter=conf_finals_matchup_counter,
     cup_finals_matchup_counter=cup_finals_matchup_counter,
-    bracket_path_counter=bracket_path_counter
+    cup_counter=cup_counter,
+    round_status=round_status,
 )
 
 print("\n" + "=" * 120)
@@ -115,7 +145,8 @@ if ENABLE_VISUALIZATIONS:
     percentage_cols = ["Playoff %", "Round 2 %", "Conf Finals %",
                        "Finals %", "Stanley Cup %", "President's Trophy %"]
     for col in percentage_cols:
-        viz_df[col] = viz_df[col].str.rstrip('%').astype(float) / 100
+        if col in viz_df.columns:
+            viz_df[col] = viz_df[col].str.rstrip('%').astype(float) / 100
 
     viz_paths = generate_all_visualizations(
         results_df=viz_df,

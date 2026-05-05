@@ -30,29 +30,8 @@ NAME_TO_CODE = {v: k for k, v in TEAM_MAP.items()}
 NST_DOTS = {"L.A": "LAK", "N.J": "NJD", "S.J": "SJS", "T.B": "TBL"}
 
 
-def scrape_schedule(output_path=None):
-    url = f"https://www.hockey-reference.com/leagues/NHL_{SEASON_CODE}_games.html"
-    print(f"Scraping {CURRENT_SEASON_FULL} schedule from Hockey-Reference...")
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, timeout=30)
-    r.raise_for_status()
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    
-    # Robust table finder with fallbacks
-    table = soup.find("table", {"id": "schedule"})
-    if not table:
-        table = soup.find("table", class_="stats_table")
-    if not table:
-        # Fallback: Grab the largest table (schedules have 100+ rows)
-        tables = soup.find_all("table")
-        table = next((t for t in tables if len(t.find_all("tr")) > 50), None)
-        if table:
-            print("   Debug: Using fallback table (largest one found).")
-    if not table:
-        raise RuntimeError("Schedule table not found — page may be loading dynamically or layout changed.")
-
+def _parse_games_table(table):
+    """Parse a Hockey-Reference schedule table into a list of game dicts."""
     games = []
     for row in table.find_all("tr")[1:]:
         cells = row.find_all(["th", "td"])
@@ -67,7 +46,6 @@ def scrape_schedule(output_path=None):
         raw_visitor = cells[2].get_text(strip=True)
         raw_home = cells[4].get_text(strip=True)
 
-        # Clean, reliable mapping — no more Columbus bugs!
         visitor_code = NAME_TO_CODE.get(raw_visitor, raw_visitor[:3].upper())
         home_code = NAME_TO_CODE.get(raw_home, raw_home[:3].upper())
 
@@ -80,7 +58,6 @@ def scrape_schedule(output_path=None):
         hg = int(hg_text or 0)
         ot = cells[6].get_text(strip=True)
         ot = ot if ot in ["OT", "SO"] else ""
-        # A game is played if both score cells are non-empty (even if a team scored 0)
         played = bool(vg_text) and bool(hg_text)
 
         games.append({
@@ -91,14 +68,52 @@ def scrape_schedule(output_path=None):
             "home_code": home_code,
             "vg": vg, "hg": hg, "ot": ot, "played": played
         })
+    return games
 
-    df = pd.DataFrame(games).sort_values("date").reset_index(drop=True)
+
+def scrape_schedule(output_path=None):
+    """
+    Scrape both regular season and playoff tables from Hockey-Reference.
+
+    Returns:
+        tuple: (regular_df, playoff_df). playoff_df is empty if playoffs haven't started.
+    """
+    url = f"https://www.hockey-reference.com/leagues/NHL_{SEASON_CODE}_games.html"
+    print(f"Scraping {CURRENT_SEASON_FULL} schedule from Hockey-Reference...")
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, timeout=30)
+    r.raise_for_status()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    regular_table = soup.find("table", {"id": "games"})
+    if not regular_table:
+        # Fallbacks for unexpected layout changes
+        regular_table = soup.find("table", {"id": "schedule"})
+    if not regular_table:
+        tables = soup.find_all("table")
+        regular_table = next((t for t in tables if len(t.find_all("tr")) > 50), None)
+        if regular_table:
+            print("   Debug: Using fallback table (largest one found).")
+    if not regular_table:
+        raise RuntimeError("Schedule table not found — page may be loading dynamically or layout changed.")
+
+    regular_df = pd.DataFrame(_parse_games_table(regular_table)).sort_values("date").reset_index(drop=True)
+
+    playoff_table = soup.find("table", {"id": "games_playoffs"})
+    if playoff_table:
+        playoff_df = pd.DataFrame(_parse_games_table(playoff_table)).sort_values("date").reset_index(drop=True)
+        print(f"   Success: {len(regular_df)} regular-season games ({regular_df['played'].sum()} played)")
+        print(f"   Playoffs detected: {len(playoff_df)} games ({playoff_df['played'].sum()} played)")
+    else:
+        playoff_df = pd.DataFrame(columns=regular_df.columns)
+        print(f"   Success: {len(regular_df)} regular-season games ({regular_df['played'].sum()} played)")
 
     if output_path:
-        df.to_csv(output_path, index=False)
-        print(f"   Success: {len(df)} games scraped ({df['played'].sum()} played)")
+        regular_df.to_csv(output_path, index=False)
 
-    return df
+    return regular_df, playoff_df
 
 
 def get_todays_games(schedule_df, today_str):

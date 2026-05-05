@@ -72,7 +72,7 @@ XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
 # DISPLAY SETTINGS
 # =============================================================================
 SHOW_TODAYS_GAMES = True
-SHOW_ROSTER_DUMP = True               # Set True if you want full roster print
+SHOW_ROSTER_DUMP = False               # Set True if you want full roster print
 SHOW_PROGRESS_EVERY = 2000             # Print progress every N sims
 
 # =============================================================================

@@ -5,7 +5,7 @@ import pandas as pd
 from collections import defaultdict, Counter
 from tqdm import tqdm
 from game_simulation import simulate_game
-from playoff_simulation import simulate_playoffs
+from playoff_simulation import simulate_playoffs, simulate_playoffs_from_state
 
 # NHL Divisions
 DIVISIONS = {
@@ -363,12 +363,165 @@ def simulate_full_season(schedule_df, current_standings, n_sims, db_path, show_p
             cup_finals_matchup_counter, bracket_path_counter)
 
 
+def simulate_playoffs_only(playoff_state, final_standings, n_sims, db_path):
+    """
+    Run N Monte Carlo simulations of the bracket starting from current playoff state.
+
+    Regular season is locked in (final_standings) and any played playoff games
+    constrain their respective series. Returns the same counter shape as
+    simulate_full_season() so display_playoff_matchups() works unchanged.
+    """
+    all_teams = sorted(final_standings.team.unique())
+
+    playoff_counter = Counter()
+    round1_counter = Counter()
+    round2_counter = Counter()
+    conf_finals_counter = Counter()
+    cup_counter = Counter()
+    pres_counter = Counter()
+    seeding_counter = Counter()
+    matchup_counter = Counter()
+    round2_matchup_counter = Counter()
+    conf_finals_matchup_counter = Counter()
+    cup_finals_matchup_counter = Counter()
+    bracket_path_counter = Counter()
+
+    # Pre-compute the actual playoff teams + seeding (deterministic — regular season is over)
+    final = final_standings.sort_values(
+        by=["points", "row", "gf-ga", "gf"], ascending=False
+    ).reset_index(drop=True)
+    pres_winner = final.iloc[0].team
+
+    playoff_teams = get_playoff_teams(final)
+
+    # Compute fixed seedings for each conference (mirrors logic in simulate_full_season)
+    east_seeds = _conf_seeding(final, playoff_teams, "Atlantic", "Metropolitan")
+    west_seeds = _conf_seeding(final, playoff_teams, "Central", "Pacific")
+
+    print(f"\nRunning {n_sims:,} playoff bracket simulations from current state...")
+
+    for _ in tqdm(range(n_sims), desc="Playoff simulations", unit="sim"):
+        # Pres trophy + playoff teams are locked
+        pres_counter[pres_winner] += 1
+        for t in playoff_teams:
+            playoff_counter[t] += 1
+
+        # Record fixed seedings
+        for seed, team in enumerate(east_seeds, 1):
+            seeding_counter[("Eastern", seed, team)] += 1
+        for seed, team in enumerate(west_seeds, 1):
+            seeding_counter[("Western", seed, team)] += 1
+
+        if len(east_seeds) >= 8:
+            matchup_counter[("Eastern", 1, east_seeds[0], 8, east_seeds[7])] += 1
+            matchup_counter[("Eastern", 3, east_seeds[2], 4, east_seeds[3])] += 1
+            matchup_counter[("Eastern", 2, east_seeds[1], 7, east_seeds[6])] += 1
+            matchup_counter[("Eastern", 5, east_seeds[4], 6, east_seeds[5])] += 1
+        if len(west_seeds) >= 8:
+            matchup_counter[("Western", 1, west_seeds[0], 8, west_seeds[7])] += 1
+            matchup_counter[("Western", 3, west_seeds[2], 4, west_seeds[3])] += 1
+            matchup_counter[("Western", 2, west_seeds[1], 7, west_seeds[6])] += 1
+            matchup_counter[("Western", 5, west_seeds[4], 6, west_seeds[5])] += 1
+
+        playoff_results = simulate_playoffs_from_state(playoff_state, final, db_path)
+
+        for team in playoff_results['round1']:
+            round1_counter[team] += 1
+        for team in playoff_results['round2']:
+            round2_counter[team] += 1
+        for team in playoff_results['conf_finals']:
+            conf_finals_counter[team] += 1
+        if playoff_results['cup_winner']:
+            cup_counter[playoff_results['cup_winner']] += 1
+
+        for conf in ('east', 'west'):
+            for matchup in playoff_results['round2_matchups'][conf]:
+                team1, team2, _ = matchup
+                normalized = tuple(sorted([team1, team2]))
+                round2_matchup_counter[(conf.upper(), normalized[0], normalized[1])] += 1
+
+        for conf in ('east', 'west'):
+            matchup = playoff_results['conf_finals_matchups'][conf]
+            if matchup:
+                team1, team2, _ = matchup
+                normalized = tuple(sorted([team1, team2]))
+                conf_finals_matchup_counter[(conf.upper(), normalized[0], normalized[1])] += 1
+
+        if playoff_results['cup_finals_matchup']:
+            east_champ, west_champ, _ = playoff_results['cup_finals_matchup']
+            cup_finals_matchup_counter[(east_champ, west_champ)] += 1
+
+        bracket_path = []
+        for conf in ('east', 'west'):
+            for matchup in playoff_results['round1_matchups'][conf]:
+                bracket_path.append((f"R1_{conf}", *matchup))
+        for conf in ('east', 'west'):
+            for matchup in playoff_results['round2_matchups'][conf]:
+                bracket_path.append((f"R2_{conf}", *matchup))
+        for conf in ('east', 'west'):
+            matchup = playoff_results['conf_finals_matchups'][conf]
+            if matchup:
+                bracket_path.append((f"CF_{conf}", *matchup))
+        if playoff_results['cup_finals_matchup']:
+            bracket_path.append(("SCF", *playoff_results['cup_finals_matchup']))
+
+        bracket_path_counter[tuple(bracket_path)] += 1
+
+    return (playoff_counter, round1_counter, round2_counter, conf_finals_counter,
+            cup_counter, pres_counter, seeding_counter, matchup_counter,
+            round2_matchup_counter, conf_finals_matchup_counter,
+            cup_finals_matchup_counter, bracket_path_counter)
+
+
+def _conf_seeding(final, playoff_teams, div1_name, div2_name):
+    """Helper: compute the 8-seed order for a conference from final standings."""
+    div1 = DIVISIONS[div1_name]
+    div2 = DIVISIONS[div2_name]
+
+    div1_playoff = [t for t in playoff_teams if t in div1]
+    div2_playoff = [t for t in playoff_teams if t in div2]
+
+    div1_sorted = final[final.team.isin(div1_playoff)].sort_values(
+        by=["points", "row", "gf-ga", "gf"], ascending=False
+    ).team.tolist()
+    div2_sorted = final[final.team.isin(div2_playoff)].sort_values(
+        by=["points", "row", "gf-ga", "gf"], ascending=False
+    ).team.tolist()
+
+    div1_top3 = div1_sorted[:3]
+    div2_top3 = div2_sorted[:3]
+
+    if not div1_top3 or not div2_top3:
+        return []
+
+    div1_pts = final[final.team == div1_top3[0]].iloc[0]["points"]
+    div2_pts = final[final.team == div2_top3[0]].iloc[0]["points"]
+
+    conf_teams = div1 + div2
+    used = set(div1_top3 + div2_top3)
+    wc = final[final.team.isin(conf_teams) & final.team.isin(playoff_teams)
+               & ~final.team.isin(used)].sort_values(
+        by=["points", "row", "gf-ga", "gf"], ascending=False
+    ).team.tolist()[:2]
+
+    if div1_pts >= div2_pts:
+        a_top, b_top = div1_top3, div2_top3
+    else:
+        a_top, b_top = div2_top3, div1_top3
+
+    return a_top[:1] + b_top[:1] + a_top[1:3] + b_top[1:3] + wc
+
+
 def display_playoff_matchups(seeding_counter, matchup_counter, n_sims,
                              round2_matchup_counter=None, conf_finals_matchup_counter=None,
                              cup_finals_matchup_counter=None, bracket_path_counter=None,
-                             min_probability=0.05):
+                             cup_counter=None,
+                             min_probability=0.05, round_status=None):
     """
     Display most likely playoff seedings and matchups for all rounds.
+
+    When `round_status` is provided (from playoff_state.round_status), sections
+    whose outcomes are already locked in are skipped to reduce noise.
 
     Args:
         seeding_counter (Counter): Counter of (conference, seed, team) tuples
@@ -379,68 +532,80 @@ def display_playoff_matchups(seeding_counter, matchup_counter, n_sims,
         cup_finals_matchup_counter (Counter): Counter of Stanley Cup Finals matchups
         bracket_path_counter (Counter): Counter of complete bracket paths
         min_probability (float): Minimum probability to display (default 5%)
+        round_status (dict | None): {'R1','R2','CF','SCF'} -> 'pending'|'active'|'done'
     """
-    print("\n" + "=" * 80)
-    print("MOST LIKELY PLAYOFF SEEDINGS")
-    print("=" * 80)
+    # In playoff mode, a round's matchups are deterministic when the upstream
+    # round is fully decided (the seeds/winners are all known). Skip those.
+    show_seedings = round_status is None
+    show_r1 = round_status is None
+    show_r2 = round_status is None or round_status.get('R1') != 'done'
+    show_cf = round_status is None or round_status.get('R2') != 'done'
+    show_scf = round_status is None or round_status.get('CF') != 'done'
+    show_r1_bracket = round_status is None
 
-    # Group seedings by conference
-    for conf in ["Eastern", "Western"]:
-        print(f"\n{conf} Conference:")
-        print("-" * 80)
+    if show_seedings:
+        print("\n" + "=" * 80)
+        print("MOST LIKELY PLAYOFF SEEDINGS")
+        print("=" * 80)
 
-        for seed in range(1, 9):
-            # Get all teams that achieved this seed in this conference
-            seed_teams = [(team, count) for (c, s, team), count in seeding_counter.items()
-                         if c == conf and s == seed]
+        # Group seedings by conference
+        for conf in ["Eastern", "Western"]:
+            print(f"\n{conf} Conference:")
+            print("-" * 80)
 
-            if seed_teams:
-                # Sort by frequency
-                seed_teams.sort(key=lambda x: x[1], reverse=True)
+            for seed in range(1, 9):
+                # Get all teams that achieved this seed in this conference
+                seed_teams = [(team, count) for (c, s, team), count in seeding_counter.items()
+                             if c == conf and s == seed]
 
-                print(f"\n  Seed #{seed}:")
-                for team, count in seed_teams[:5]:  # Show top 5 most likely
+                if seed_teams:
+                    # Sort by frequency
+                    seed_teams.sort(key=lambda x: x[1], reverse=True)
+
+                    print(f"\n  Seed #{seed}:")
+                    for team, count in seed_teams[:5]:  # Show top 5 most likely
+                        prob = count / n_sims
+                        if prob >= min_probability:
+                            print(f"    {team:30s} {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+
+    if show_r1:
+        print("\n" + "=" * 80)
+        print("MOST LIKELY ROUND 1 MATCHUPS")
+        print("=" * 80)
+
+        # Group matchups by conference and series
+        for conf in ["Eastern", "Western"]:
+            print(f"\n{conf} Conference:")
+            print("-" * 80)
+
+            # Group by series type (divisional format: 1v8, 3v4, 2v7, 5v6)
+            # Div1: 1vWC2, 3v4  |  Div2: 2vWC1, 5v6
+            for series_seeds in [(1, 8), (3, 4), (2, 7), (5, 6)]:
+                seed1, seed2 = series_seeds
+
+                # Get all matchups for this series
+                series_matchups = [(key, count) for key, count in matchup_counter.items()
+                                  if key[0] == conf and key[1] == seed1 and key[3] == seed2]
+
+                if not series_matchups:
+                    continue
+
+                series_matchups.sort(key=lambda x: x[1], reverse=True)
+
+                # Show top 5 for each series
+                print(f"\n  ({seed1}) vs ({seed2}):")
+                displayed = 0
+                for matchup, count in series_matchups[:10]:
+                    _, s1, team1, s2, team2 = matchup
                     prob = count / n_sims
-                    if prob >= min_probability:
-                        print(f"    {team:30s} {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
-
-    print("\n" + "=" * 80)
-    print("MOST LIKELY ROUND 1 MATCHUPS")
-    print("=" * 80)
-
-    # Group matchups by conference and series
-    for conf in ["Eastern", "Western"]:
-        print(f"\n{conf} Conference:")
-        print("-" * 80)
-
-        # Group by series type (divisional format: 1v8, 3v4, 2v7, 5v6)
-        # Div1: 1vWC2, 3v4  |  Div2: 2vWC1, 5v6
-        for series_seeds in [(1, 8), (3, 4), (2, 7), (5, 6)]:
-            seed1, seed2 = series_seeds
-
-            # Get all matchups for this series
-            series_matchups = [(key, count) for key, count in matchup_counter.items()
-                              if key[0] == conf and key[1] == seed1 and key[3] == seed2]
-
-            if not series_matchups:
-                continue
-
-            series_matchups.sort(key=lambda x: x[1], reverse=True)
-
-            # Show top 5 for each series
-            print(f"\n  ({seed1}) vs ({seed2}):")
-            displayed = 0
-            for matchup, count in series_matchups[:10]:
-                _, s1, team1, s2, team2 = matchup
-                prob = count / n_sims
-                if prob >= min_probability or displayed < 3:  # Show at least top 3
-                    print(f"    {team1:28s} vs {team2:28s}  {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
-                    displayed += 1
-                    if displayed >= 5:  # Cap at 5 per series
-                        break
+                    if prob >= min_probability or displayed < 3:  # Show at least top 3
+                        print(f"    {team1:28s} vs {team2:28s}  {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+                        displayed += 1
+                        if displayed >= 5:  # Cap at 5 per series
+                            break
 
     # Display Round 2 matchups
-    if round2_matchup_counter:
+    if show_r2 and round2_matchup_counter:
         print("\n" + "=" * 80)
         print("MOST LIKELY ROUND 2 (SECOND ROUND) MATCHUPS")
         print("=" * 80)
@@ -468,7 +633,7 @@ def display_playoff_matchups(seeding_counter, matchup_counter, n_sims,
                             break
 
     # Display Conference Finals matchups
-    if conf_finals_matchup_counter:
+    if show_cf and conf_finals_matchup_counter:
         print("\n" + "=" * 80)
         print("MOST LIKELY CONFERENCE FINALS MATCHUPS")
         print("=" * 80)
@@ -495,8 +660,8 @@ def display_playoff_matchups(seeding_counter, matchup_counter, n_sims,
                         if displayed >= 10:
                             break
 
-    # Display Stanley Cup Finals matchups
-    if cup_finals_matchup_counter:
+    # Display Stanley Cup Finals matchups + most likely champion
+    if show_scf and cup_finals_matchup_counter:
         print("\n" + "=" * 80)
         print("MOST LIKELY STANLEY CUP FINALS MATCHUP")
         print("=" * 80)
@@ -514,103 +679,59 @@ def display_playoff_matchups(seeding_counter, matchup_counter, n_sims,
                 if displayed >= 15:
                     break
 
-    # Display most likely complete bracket outcome
-    if bracket_path_counter:
+        if cup_counter:
+            print()
+            print("  Most Likely Stanley Cup Champion:")
+            print("  " + "-" * 78)
+            top_champs = cup_counter.most_common(10)
+            displayed = 0
+            for team, count in top_champs:
+                prob = count / n_sims
+                if prob >= min_probability or displayed < 5:
+                    print(f"    {team:28s}                                  {prob*100:5.1f}%  ({count:,}/{n_sims:,})")
+                    displayed += 1
+                    if displayed >= 10:
+                        break
+
+    if show_r1_bracket:
         print("\n" + "=" * 80)
-        print("MOST LIKELY COMPLETE PLAYOFF BRACKET OUTCOME")
+        print("MOST LIKELY ROUND 1 BRACKET")
+        print("=" * 80)
+        print("(Based on most common seeding for each team)")
         print("=" * 80)
 
-        # Get the most common bracket path
-        most_common_paths = bracket_path_counter.most_common(5)
+        # For each conference, build bracket from most common seeds
+        for conf in ["Eastern", "Western"]:
+            print(f"\n{conf} Conference:")
+            print("-" * 80)
 
-        if most_common_paths:
-            for rank, (path, count) in enumerate(most_common_paths, 1):
-                prob = count / n_sims
-                print(f"\n#{rank} Most Likely Bracket ({prob*100:.2f}% - {count:,}/{n_sims:,} simulations):")
-                print("-" * 80)
+            # Get all seedings for this conference and sort by frequency
+            conf_seedings = [(seed, team, count) for (c, seed, team), count in seeding_counter.items() if c == conf]
+            conf_seedings.sort(key=lambda x: x[2], reverse=True)
 
-                # Parse and display the bracket path
-                east_r1_winners = []
-                west_r1_winners = []
-                east_r2_winners = []
-                west_r2_winners = []
-                east_cf_winner = None
-                west_cf_winner = None
-                cup_winner = None
+            # Greedily assign teams to seeds (most frequent first)
+            bracket = {}
+            used_teams = set()
 
-                for entry in path:
-                    round_id, team1, team2, winner = entry
+            for seed, team, count in conf_seedings:
+                # If this seed is empty and this team hasn't been assigned yet
+                if seed not in bracket and team not in used_teams:
+                    bracket[seed] = team
+                    used_teams.add(team)
 
-                    if round_id == "R1_east":
-                        east_r1_winners.append(winner)
-                    elif round_id == "R1_west":
-                        west_r1_winners.append(winner)
-                    elif round_id == "R2_east":
-                        east_r2_winners.append(winner)
-                    elif round_id == "R2_west":
-                        west_r2_winners.append(winner)
-                    elif round_id == "CF_east":
-                        east_cf_winner = winner
-                    elif round_id == "CF_west":
-                        west_cf_winner = winner
-                    elif round_id == "SCF":
-                        cup_winner = winner
+                    # Stop once we have all 8 seeds filled
+                    if len(bracket) == 8:
+                        break
 
-                # Display in bracket format
-                print("  EASTERN CONFERENCE:")
-                print(f"    Round 1 Winners: {', '.join(east_r1_winners)}")
-                print(f"    Round 2 Winners: {', '.join(east_r2_winners)}")
-                print(f"    Conference Champion: {east_cf_winner}")
-
-                print("  WESTERN CONFERENCE:")
-                print(f"    Round 1 Winners: {', '.join(west_r1_winners)}")
-                print(f"    Round 2 Winners: {', '.join(west_r2_winners)}")
-                print(f"    Conference Champion: {west_cf_winner}")
-
-                print(f"  STANLEY CUP CHAMPION: {cup_winner}")
-
-                # Only show top 3 for readability (can be more verbose with N_SIMS=1)
-                if rank >= 3 and n_sims > 1:
-                    break
-
-    print("\n" + "=" * 80)
-    print("MOST LIKELY ROUND 1 BRACKET")
-    print("=" * 80)
-    print("(Based on most common seeding for each team)")
-    print("=" * 80)
-
-    # For each conference, build bracket from most common seeds
-    for conf in ["Eastern", "Western"]:
-        print(f"\n{conf} Conference:")
-        print("-" * 80)
-
-        # Get all seedings for this conference and sort by frequency
-        conf_seedings = [(seed, team, count) for (c, seed, team), count in seeding_counter.items() if c == conf]
-        conf_seedings.sort(key=lambda x: x[2], reverse=True)
-
-        # Greedily assign teams to seeds (most frequent first)
-        bracket = {}
-        used_teams = set()
-
-        for seed, team, count in conf_seedings:
-            # If this seed is empty and this team hasn't been assigned yet
-            if seed not in bracket and team not in used_teams:
-                bracket[seed] = team
-                used_teams.add(team)
-
-                # Stop once we have all 8 seeds filled
-                if len(bracket) == 8:
-                    break
-
-        # Display the bracket matchups (divisional format)
-        if len(bracket) >= 8:
-            print(f"  Division 1 (Higher seed):")
-            print(f"    (1) {bracket[1]:26s} vs (WC2) {bracket[8]:26s}")
-            print(f"    (3) {bracket[3]:26s} vs (4)   {bracket[4]:26s}")
-            print(f"  Division 2 (Lower seed):")
-            print(f"    (2) {bracket[2]:26s} vs (WC1) {bracket[7]:26s}")
-            print(f"    (5) {bracket[5]:26s} vs (6)   {bracket[6]:26s}")
-        else:
-            print(f"  [Not enough data to construct full bracket - only {len(bracket)} seeds]")
+            # Display the bracket matchups (divisional format)
+            if len(bracket) >= 8:
+                print(f"  Division 1 (Higher seed):")
+                print(f"    (1) {bracket[1]:26s} vs (WC2) {bracket[8]:26s}")
+                print(f"    (3) {bracket[3]:26s} vs (4)   {bracket[4]:26s}")
+                print(f"  Division 2 (Lower seed):")
+                print(f"    (2) {bracket[2]:26s} vs (WC1) {bracket[7]:26s}")
+                print(f"    (5) {bracket[5]:26s} vs (6)   {bracket[6]:26s}")
+            else:
+                print(f"  [Not enough data to construct full bracket - only {len(bracket)} seeds]")
 
     print("\n" + "=" * 80)
