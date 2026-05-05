@@ -1,6 +1,7 @@
 # game_simulation.py
 # Single game simulation logic with improved statistical modeling
 
+import sqlite3
 import numpy as np
 from tqdm import tqdm
 from config import (
@@ -9,14 +10,16 @@ from config import (
 )
 from team_strength import get_team_strength
 
-# Module-level cache for team strengths (cleared between runs)
+# Module-level caches (cleared between runs)
 _strength_cache = {}
+_calibration_cache = {}
 
 
 def clear_strength_cache():
-    """Clear the team strength cache. Call this when data updates."""
-    global _strength_cache
+    """Clear the team strength and calibration caches. Call this when data updates."""
+    global _strength_cache, _calibration_cache
     _strength_cache = {}
+    _calibration_cache = {}
 
 
 def get_cached_strength(team, db_path, location):
@@ -25,6 +28,38 @@ def get_cached_strength(team, db_path, location):
     if cache_key not in _strength_cache:
         _strength_cache[cache_key] = get_team_strength(team, db_path, location)
     return _strength_cache[cache_key]
+
+
+def get_xg_divisor(db_path):
+    """
+    Empirical divisor for the xG formula: home_xg = ho * ad / divisor.
+
+    team_strength returns TOI-weighted position averages, which run hotter than
+    the true league xGF/60 (top-line forwards dominate the weighting). Using the
+    raw LEAGUE_AVG_XG_PER_60 as the divisor inflates predicted totals.
+
+    This computes the divisor that makes E[home_xg] = LEAGUE_AVG_XG_PER_60 when
+    teams are league-average, by averaging actual team_strength outputs.
+    """
+    if db_path in _calibration_cache:
+        return _calibration_cache[db_path]
+
+    conn = sqlite3.connect(db_path)
+    teams = [r[0] for r in conn.execute(
+        "SELECT DISTINCT Team FROM players WHERE Team IS NOT NULL AND Team != ''"
+    ).fetchall()]
+    conn.close()
+
+    offs, defs = [], []
+    for t in teams:
+        for loc in ("home", "away"):
+            o, d = get_cached_strength(t, db_path, loc)
+            offs.append(o)
+            defs.append(d)
+
+    divisor = (float(np.mean(offs)) * float(np.mean(defs))) / LEAGUE_AVG_XG_PER_60
+    _calibration_cache[db_path] = divisor
+    return divisor
 
 
 def simulate_overtime(home_xg, away_xg):
@@ -80,26 +115,27 @@ def simulate_game(home, away, db_path, use_cache=True):
         ho, hd = get_team_strength(home, db_path, location="home")
         ao, ad = get_team_strength(away, db_path, location="away")
 
-    # Apply game-to-game variance using normal distribution (more realistic than uniform)
+    # Per-team form variance: a "good night" should raise offense AND lower xGA (better defense).
+    # Previous version multiplied both ho and hd by the same factor, which falsely made defense
+    # *worse* on a team's good night (higher xGA = more goals allowed).
     if TEAM_STRENGTH_VARIANCE > 0:
-        # Correlated variance per team (a team's "good night" affects both metrics)
-        home_var = np.clip(np.random.normal(1.0, TEAM_STRENGTH_VARIANCE / 2), 0.85, 1.15)
-        away_var = np.clip(np.random.normal(1.0, TEAM_STRENGTH_VARIANCE / 2), 0.85, 1.15)
+        sigma = TEAM_STRENGTH_VARIANCE / 2
+        home_form = np.clip(np.random.normal(1.0, sigma), 0.85, 1.15)
+        away_form = np.clip(np.random.normal(1.0, sigma), 0.85, 1.15)
 
-        ho *= home_var
-        hd *= home_var  # Good offensive night slightly correlates with defensive effort
-        ao *= away_var
-        ad *= away_var
+        ho *= home_form
+        hd /= home_form
+        ao *= away_form
+        ad /= away_form
 
-    # Calculate expected goals using location-specific team strength
-    # Home ice advantage is now built into the home/away stats (no multiplier needed)
-    # Formula: League Avg * (Offense / League Avg) * (Opponent Defense / League Avg)
-    home_xg = (LEAGUE_AVG_XG_PER_60 * (ho / LEAGUE_AVG_XG_PER_60) *
-               (ad / LEAGUE_AVG_XG_PER_60))
-    away_xg = (LEAGUE_AVG_XG_PER_60 * (ao / LEAGUE_AVG_XG_PER_60) *
-               (hd / LEAGUE_AVG_XG_PER_60))
+    # Calculate expected goals using location-specific team strength.
+    # Home ice advantage is built into the home/away stats (no multiplier needed).
+    # Divisor is calibrated empirically (see get_xg_divisor) so league-average teams
+    # produce league-average xG; using LEAGUE_AVG_XG_PER_60 directly inflates totals.
+    divisor = get_xg_divisor(db_path)
+    home_xg = ho * ad / divisor
+    away_xg = ao * hd / divisor
 
-    # Sanity clamp expected goals (NHL games rarely exceed 6 goals per team)
     home_xg = max(0.5, min(home_xg, 6.0))
     away_xg = max(0.5, min(away_xg, 6.0))
 

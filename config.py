@@ -31,7 +31,7 @@ N_SIMS_TODAY = 100001                  # Simulations per today's game
 # HOME_ICE_ADVANTAGE removed - now using actual home/away player stats from NST
 # Home advantage is built into the empirical performance differences between locations
 LEAGUE_AVG_XG_PER_60 = 3.10            # All-situations league average (updated from 2.95 for 5v5)
-OT_HOME_WIN_PROB = 0.55                # Historical: ~55% of OT/SO won by home team
+OT_HOME_WIN_PROB = 0.51                # Empirical 2025-26: 49.1% (160/326). Historical ~51%.
 TEAM_STRENGTH_VARIANCE = 0.15          # ±15% game-to-game variance (injuries, form, etc.)
 
 # Position weights for team strength calculations (must sum to 1.0)
