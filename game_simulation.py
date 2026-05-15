@@ -8,9 +8,12 @@ from config import (
     LEAGUE_AVG_XG_PER_60, OT_HOME_WIN_PROB,
     N_SIMS_TODAY, TEAM_STRENGTH_VARIANCE, GAME_PACE_VARIANCE,
     SCORING_CORRELATION, MIN_GAME_XG, MAX_GAME_XG,
-    OT_ENDS_IN_GOAL_PROB, OT_SKILL_WEIGHT, SHOOTOUT_HOME_WIN_PROB
+    OT_ENDS_IN_GOAL_PROB, OT_SKILL_WEIGHT, SHOOTOUT_HOME_WIN_PROB,
+    ENABLE_TEAM_PROFILE_ADJUSTMENTS
 )
 from team_strength import get_team_strength
+from team_profile import get_team_profile
+from special_teams import calculate_special_teams_multipliers, clear_special_teams_cache
 
 # Module-level caches (cleared between runs)
 _strength_cache = {}
@@ -22,6 +25,7 @@ def clear_strength_cache():
     global _strength_cache, _calibration_cache
     _strength_cache = {}
     _calibration_cache = {}
+    clear_special_teams_cache()
 
 
 def get_cached_strength(team, db_path, location):
@@ -100,6 +104,16 @@ def calculate_expected_goals(home, away, db_path, use_cache=True, apply_variance
     divisor = get_xg_divisor(db_path)
     home_xg = ho * ad / divisor
     away_xg = ao * hd / divisor
+
+    if ENABLE_TEAM_PROFILE_ADJUSTMENTS:
+        home_profile = get_team_profile(home, db_path, "home")
+        away_profile = get_team_profile(away, db_path, "away")
+        home_xg *= home_profile["offense_multiplier"] * away_profile["defense_multiplier"]
+        away_xg *= away_profile["offense_multiplier"] * home_profile["defense_multiplier"]
+
+    home_st_multiplier, away_st_multiplier = calculate_special_teams_multipliers(home, away, db_path)
+    home_xg *= home_st_multiplier
+    away_xg *= away_st_multiplier
 
     # Hockey games have shared tempo: officiating, score effects, goalie pulls,
     # and matchup pace tend to move both teams' scoring environments together.

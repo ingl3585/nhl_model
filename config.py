@@ -40,6 +40,14 @@ MAX_GAME_XG = 6.0                      # Ceiling for simulated regulation expect
 OT_ENDS_IN_GOAL_PROB = 0.67            # Probability overtime ends before shootout
 OT_SKILL_WEIGHT = 0.30                 # Weight of regulation xG edge in OT winner probability
 SHOOTOUT_HOME_WIN_PROB = 0.52          # Shootouts are close to coin flips
+ENABLE_TEAM_PROFILE_ADJUSTMENTS = True # Add capped top-end/depth team profile modifier
+TEAM_PROFILE_MAX_XG_ADJUSTMENT = 0.08  # Max profile-driven xG adjustment per team
+TOP_SKATER_PREMIUM_WEIGHT = 0.10       # Rewards elite/high-minute skater impact
+ELITE_DEFENSE_PREMIUM_WEIGHT = 0.08    # Rewards top-pair defenseman impact
+DEPTH_STABILITY_WEIGHT = 0.04          # Rewards quality below the top skaters
+ENABLE_SPECIAL_TEAMS_ADJUSTMENTS = True # Add PP/PK matchup modifier when team data exists
+SPECIAL_TEAMS_MATCHUP_WEIGHT = 0.12     # How strongly PP/PK edges move game xG
+SPECIAL_TEAMS_MAX_XG_ADJUSTMENT = 0.06  # Max special-teams matchup adjustment per team
 
 # Position weights for team strength calculations (must sum to 1.0)
 FORWARD_OFFENSE_WEIGHT = 0.85          # Forwards drive 85% of offense
@@ -80,6 +88,8 @@ XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
 # =============================================================================
 SHOW_TODAYS_GAMES = True
 SHOW_ROSTER_DUMP = True               # Set True if you want full roster print
+SHOW_TEAM_PROFILE_REPORT = True       # Print derived top-end/depth profile modifiers
+SHOW_ROSTER_AUDIT = True              # Print roster eligibility warnings and position counts
 SHOW_PROGRESS_EVERY = 2000             # Print progress every N sims
 
 # =============================================================================

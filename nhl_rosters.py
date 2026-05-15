@@ -8,6 +8,7 @@ import os
 import time
 import tempfile
 import datetime
+from io import StringIO
 import undetected_chromedriver as uc
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -16,7 +17,8 @@ from selenium.webdriver.common.by import By
 from config import (
     TEAM_ABBREV_FIXES, MIN_TOI_MINUTES, RECENT_FORM_WEIGHT,
     FULL_SEASON_WEIGHT, LAST_YEAR_WEIGHT, SHOW_ROSTER_DUMP, RECENT_GAMES_TGP,
-    MIN_GP_PERCENTAGE, ACTIVE_ROSTER_WINDOW, ACTIVE_ROSTER_MIN_GP_PCT
+    MIN_GP_PERCENTAGE, ACTIVE_ROSTER_WINDOW, ACTIVE_ROSTER_MIN_GP_PCT,
+    ENABLE_SPECIAL_TEAMS_ADJUSTMENTS
 )
 
 # Team mappings (consistent with schedule module)
@@ -38,6 +40,8 @@ TEAM_MAP = {
     "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights",
     "WSH": "Washington Capitals", "WPG": "Winnipeg Jets"
 }
+
+TEAM_NAME_FIXES = {**TEAM_MAP, **TEAM_ABBREV_FIXES}
 
 # Apply config fixes
 TEAM_MAP.update(TEAM_ABBREV_FIXES)
@@ -65,6 +69,21 @@ def is_defense_position(position):
 
 def is_goalie_position(position):
     return "G" in position_tokens(position)
+
+
+def normalize_player_name_for_match(name):
+    """Normalize display-name variants for loose audit matching."""
+    if pd.isna(name):
+        return ""
+    replacements = {
+        "samuel": "sam",
+        "zachary": "zack",
+        "egor": "yegor",
+    }
+    parts = [p.strip().lower() for p in str(name).replace(".", "").split() if p.strip()]
+    if parts:
+        parts[0] = replacements.get(parts[0], parts[0])
+    return " ".join(parts)
 
 
 def clean_team_name(team_str):
@@ -111,7 +130,7 @@ def create_nst_driver():
     })
     driver._nst_download_dir = download_dir
 
-    print("   Opening Natural Stat Trick — solve the Cloudflare check if prompted (up to 60s)...")
+    print("   Opening Natural Stat Trick - solve the Cloudflare check if prompted (up to 60s)...")
     driver.get("https://www.naturalstattrick.com/")
     WebDriverWait(driver, 60).until(lambda d: "Just a moment" not in d.title)
     print("   Cloudflare cleared.")
@@ -132,18 +151,22 @@ def download_nst_stats(url, driver, dataset_name):
     """
     try:
         driver.get(url)
-        # Wait for the CSV download link — only present on the real NST page
+        # Wait for the CSV download link - only present on the real NST page
         WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "CSV"))
         )
 
         dl_dir = driver._nst_download_dir
 
-        # Clear download dir before triggering new download
+        # Clear download dir before triggering new download. Chrome can briefly
+        # hold downloads.htm open; skip locked files instead of failing the run.
         for f in os.listdir(dl_dir):
-            os.remove(os.path.join(dl_dir, f))
+            try:
+                os.remove(os.path.join(dl_dir, f))
+            except PermissionError:
+                pass
 
-        # Click the CSV link directly — browser handles the download natively
+        # Click the CSV link directly - browser handles the download natively
         csv_element = driver.find_element(By.PARTIAL_LINK_TEXT, "CSV")
         csv_element.click()
 
@@ -167,12 +190,129 @@ def download_nst_stats(url, driver, dataset_name):
         if df.columns[0] in [0, '', 'Unnamed: 0']:
             df.rename(columns={df.columns[0]: 'Player_ID'}, inplace=True)
 
-        print(f"   ✓ {dataset_name}: {len(df)} players")
+        print(f"   OK {dataset_name}: {len(df)} rows")
         return df
 
     except Exception as e:
-        print(f"   ✗ {dataset_name} failed: {e}")
+        print(f"   FAILED {dataset_name}: {e}")
         return pd.DataFrame()
+
+
+def download_nst_team_table(url, driver, dataset_name):
+    """
+    Download team-level NST tables.
+
+    The player pages expose a CSV link, but teamtable pages can render as an
+    HTML DataTable without the same CSV element. Reading the page table directly
+    avoids sitting on PP/PK pages waiting for a link that may never appear.
+    """
+    try:
+        driver.get(url)
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.TAG_NAME, "table"))
+        )
+        tables = pd.read_html(StringIO(driver.page_source))
+        tables = [t for t in tables if "Team" in t.columns]
+        if not tables:
+            raise RuntimeError("No Team table found on page")
+        df = max(tables, key=len)
+        print(f"   OK {dataset_name}: {len(df)} rows")
+        return df
+    except Exception as e:
+        print(f"   FAILED {dataset_name}: {e}")
+        return pd.DataFrame()
+
+
+def _normalize_team_name(value):
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    return TEAM_NAME_FIXES.get(text, text)
+
+
+def _find_column(df, candidates):
+    normalized = {str(col).strip().lower(): col for col in df.columns}
+    for candidate in candidates:
+        key = candidate.strip().lower()
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def _extract_team_situation(df, prefix, metric_map):
+    if df.empty:
+        return pd.DataFrame()
+
+    team_col = _find_column(df, ["Team"])
+    if not team_col:
+        return pd.DataFrame()
+
+    out = pd.DataFrame({"Team": df[team_col].apply(_normalize_team_name)})
+    for target, candidates in metric_map.items():
+        source = _find_column(df, candidates)
+        if source:
+            out[f"{prefix}_{target}"] = pd.to_numeric(df[source], errors="coerce")
+
+    return out.dropna(subset=["Team"]).drop_duplicates(subset=["Team"], keep="first")
+
+
+def _weighted_team_situation(full_df, recent_df, prefix, metric_map):
+    full = _extract_team_situation(full_df, prefix, metric_map)
+    recent = _extract_team_situation(recent_df, prefix, metric_map)
+
+    if full.empty and recent.empty:
+        return pd.DataFrame()
+    if full.empty:
+        return recent
+    if recent.empty:
+        return full
+
+    merged = full.merge(recent, on="Team", how="outer", suffixes=("_full", "_recent"))
+    weighted = pd.DataFrame({"Team": merged["Team"]})
+    full_weight = 1.0 - RECENT_FORM_WEIGHT
+
+    for target in metric_map:
+        col = f"{prefix}_{target}"
+        full_col = f"{col}_full"
+        recent_col = f"{col}_recent"
+        full_vals = pd.to_numeric(
+            merged[full_col] if full_col in merged.columns else pd.Series(np.nan, index=merged.index),
+            errors="coerce"
+        )
+        recent_vals = pd.to_numeric(
+            merged[recent_col] if recent_col in merged.columns else pd.Series(np.nan, index=merged.index),
+            errors="coerce"
+        )
+        total_weight = full_vals.notna().astype(float) * full_weight
+        total_weight += recent_vals.notna().astype(float) * RECENT_FORM_WEIGHT
+        numerator = full_vals.fillna(0) * full_weight + recent_vals.fillna(0) * RECENT_FORM_WEIGHT
+        weighted[col] = np.where(total_weight > 0, numerator / total_weight, np.nan)
+
+    return weighted
+
+
+def build_special_teams_table(pp_full, pp_recent, pk_full, pk_recent):
+    pp_metrics = {
+        "TOI": ["TOI"],
+        "xGF/60": ["xGF/60"],
+        "GF/60": ["GF/60"],
+    }
+    pk_metrics = {
+        "TOI": ["TOI"],
+        "xGA/60": ["xGA/60"],
+        "GA/60": ["GA/60"],
+    }
+
+    pp = _weighted_team_situation(pp_full, pp_recent, "PP", pp_metrics)
+    pk = _weighted_team_situation(pk_full, pk_recent, "PK", pk_metrics)
+
+    if pp.empty and pk.empty:
+        return pd.DataFrame()
+    if pp.empty:
+        return pk
+    if pk.empty:
+        return pp
+    return pp.merge(pk, on="Team", how="outer")
 
 
 def merge_and_weight_stats(full_df, recent_df, last_year_df=None,
@@ -199,17 +339,17 @@ def merge_and_weight_stats(full_df, recent_df, last_year_df=None,
     has_last_year = not last_year_df.empty if last_year_df is not None else False
 
     if not has_recent and not has_last_year:
-        print("   ⚠ No recent or last year stats available, using full season only")
+        print("   WARNING No recent or last year stats available, using full season only")
         return full_df
 
     # Normalize weights if datasets are missing
     if not has_recent:
-        print("   ⚠ No recent stats available, redistributing weight")
+        print("   WARNING No recent stats available, redistributing weight")
         full_weight = full_weight / (full_weight + last_year_weight) if has_last_year else 1.0
         last_year_weight = 1.0 - full_weight if has_last_year else 0.0
         recent_weight = 0.0
     elif not has_last_year:
-        print("   ⚠ No last year stats available, redistributing weight")
+        print("   WARNING No last year stats available, redistributing weight")
         full_weight = full_weight / (full_weight + recent_weight)
         recent_weight = 1.0 - full_weight
         last_year_weight = 0.0
@@ -238,9 +378,9 @@ def merge_and_weight_stats(full_df, recent_df, last_year_df=None,
         merge_keys = ["Player", "Team", "Position"]
         for key in merge_keys:
             if key not in full_df.columns:
-                print(f"   ⚠ WARNING: '{key}' not in full_df columns!")
+                print(f"   WARNING: '{key}' not in full_df columns!")
             if key not in recent_df.columns:
-                print(f"   ⚠ WARNING: '{key}' not in recent_df columns!")
+                print(f"   WARNING: '{key}' not in recent_df columns!")
 
         before_count = len(merged)
         merged = merged.merge(
@@ -254,9 +394,9 @@ def merge_and_weight_stats(full_df, recent_df, last_year_df=None,
         # Check how many rows got recent data
         if "TOI_recent" in merged.columns:
             matched_count = merged["TOI_recent"].notna().sum()
-            print(f"   → Recent merge: {matched_count}/{before_count} players matched")
+            print(f"   -> Recent merge: {matched_count}/{before_count} players matched")
         else:
-            print(f"   ⚠ WARNING: No TOI_recent column after merge!")
+            print(f"   WARNING: No TOI_recent column after merge!")
 
     # Merge last year stats if available
     # Match on Player + Position (not Team, since players may have changed teams)
@@ -411,11 +551,20 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     if os.path.exists(db_path):
         mtime = datetime.date.fromtimestamp(os.path.getmtime(db_path))
         if mtime >= today:
-            print(f"Player data already up to date (db last updated: {mtime}). Skipping NST download.")
             conn = sqlite3.connect(db_path)
-            df = pd.read_sql("SELECT * FROM players", conn)
-            conn.close()
-            return df
+            has_special_teams = True
+            if ENABLE_SPECIAL_TEAMS_ADJUSTMENTS:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='team_special_teams'")
+                has_special_teams = cursor.fetchone() is not None
+            if not has_special_teams:
+                conn.close()
+                print("Player DB is current, but special teams table is missing. Refreshing NST data.")
+            else:
+                print(f"Player data already up to date (db last updated: {mtime}). Skipping NST download.")
+                df = pd.read_sql("SELECT * FROM players", conn)
+                conn.close()
+                return df
 
     print(f"Downloading live 2025-26 player stats from Natural Stat Trick...")
     print(f"   Weighting: {recent_weight:.0%} recent (L{RECENT_GAMES_TGP}) + {full_weight:.0%} full season + {last_year_weight:.0%} last year")
@@ -424,6 +573,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
 
     # Base URL template for easy home/away generation
     base_url_template = "https://www.naturalstattrick.com/playerteams.php?fromseason={season}&thruseason={season}&stype=2&sit=all&score=all&stdoi={stdoi}&rate=y&team=ALL&pos={pos}&loc={loc}&toi=0&gpfilt={gpfilt}&fd=&td=&tgp={tgp}&lines=single&draftteam=ALL"
+    team_url_template = "https://www.naturalstattrick.com/teamtable.php?fromseason={season}&thruseason={season}&stype=2&sit={sit}&score=all&rate=y&team=all&loc=B&gpfilt={gpfilt}&fd=&td=&tgp={tgp}"
 
     # URLs for CURRENT SEASON (2025-26) - HOME
     skaters_full_home_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="H", gpfilt="none", tgp="410")
@@ -438,10 +588,16 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     goalies_recent_away_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="A", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
 
     # URLs for active roster identification
-    # Skaters: last ACTIVE_ROSTER_WINDOW games — players with >=50% GP are considered active & on correct team
-    # Goalies: last RECENT_GAMES_TGP games — need wider window to capture starter AND backup
+    # Skaters: last ACTIVE_ROSTER_WINDOW games - players with >=50% GP are considered active & on correct team
+    # Goalies: last RECENT_GAMES_TGP games - need wider window to capture starter AND backup
     skaters_last_game_url = base_url_template.format(season="20252026", stdoi="oi", pos="S", loc="B", gpfilt="gpteam", tgp=ACTIVE_ROSTER_WINDOW)
     goalies_active_roster_url = base_url_template.format(season="20252026", stdoi="g", pos="G", loc="B", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
+
+    # Team-level special teams. 5v4 is power play attack; 4v5 is penalty kill defense.
+    pp_full_url = team_url_template.format(season="20252026", sit="5v4", gpfilt="none", tgp="410")
+    pk_full_url = team_url_template.format(season="20252026", sit="4v5", gpfilt="none", tgp="410")
+    pp_recent_url = team_url_template.format(season="20252026", sit="5v4", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
+    pk_recent_url = team_url_template.format(season="20252026", sit="4v5", gpfilt="gpteam", tgp=RECENT_GAMES_TGP)
 
     # URLs for LAST YEAR (2024-25) - HOME
     skaters_lastyear_home_url = base_url_template.format(season="20242025", stdoi="oi", pos="S", loc="H", gpfilt="none", tgp="410")
@@ -469,8 +625,19 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     # Skaters: last game captures most of the roster
     # Goalies: last N games (RECENT_GAMES_TGP) needed to capture both starter and backup (only 1-2 goalies play per game)
     print("   Downloading active roster data (injury/trade filter)...")
-    skaters_last_game = download_nst_stats(skaters_last_game_url, driver, f"Active roster skaters (L{ACTIVE_ROSTER_WINDOW}, ≥{ACTIVE_ROSTER_MIN_GP_PCT:.0%} GP)")
+    skaters_last_game = download_nst_stats(skaters_last_game_url, driver, f"Active roster skaters (L{ACTIVE_ROSTER_WINDOW}, >={ACTIVE_ROSTER_MIN_GP_PCT:.0%} GP)")
     goalies_active = download_nst_stats(goalies_active_roster_url, driver, f"Last {RECENT_GAMES_TGP} games goalies roster (captures backups)")
+
+    special_teams_df = pd.DataFrame()
+    if ENABLE_SPECIAL_TEAMS_ADJUSTMENTS:
+        print("   Downloading team special teams data...")
+        pp_full = download_nst_team_table(pp_full_url, driver, "Team power play full season (5v4)")
+        pk_full = download_nst_team_table(pk_full_url, driver, "Team penalty kill full season (4v5)")
+        pp_recent = download_nst_team_table(pp_recent_url, driver, f"Team power play last {RECENT_GAMES_TGP} games (5v4)")
+        pk_recent = download_nst_team_table(pk_recent_url, driver, f"Team penalty kill last {RECENT_GAMES_TGP} games (4v5)")
+        special_teams_df = build_special_teams_table(pp_full, pp_recent, pk_full, pk_recent)
+        if not special_teams_df.empty:
+            print(f"   OK Special teams table built: {len(special_teams_df)} teams")
 
     # Download last year's datasets (if enabled)
     skaters_lastyear_home = pd.DataFrame()
@@ -508,7 +675,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
 
     # Check if we got any data
     if skaters_full_home.empty and goalies_full_home.empty:
-        print("   ⚠ NST download failed completely → using league averages")
+        print("   WARNING NST download failed completely -> using league averages")
         return pd.DataFrame()
 
     # Use last game roster to identify active players and update team assignments for traded players
@@ -519,7 +686,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
 
     # Build active roster: players with >= ACTIVE_ROSTER_MIN_GP_PCT of last ACTIVE_ROSTER_WINDOW games
     # NST gpfilt=gpteam anchors to the player's CURRENT team, so traded players appear under their new
-    # team once they've accumulated enough games there — no multi-team string parsing needed.
+    # team once they've accumulated enough games there - no multi-team string parsing needed.
     min_active_gp = round(ACTIVE_ROSTER_WINDOW * ACTIVE_ROSTER_MIN_GP_PCT)
     current_team_map = {}
 
@@ -540,9 +707,9 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
             gp_vals = pd.to_numeric(skaters_last_game[gp_col], errors="coerce").fillna(0)
             before = len(skaters_last_game)
             skaters_last_game = skaters_last_game[gp_vals >= min_active_gp].copy()
-            print(f"   → Active roster: {len(skaters_last_game)}/{before} skaters with {min_active_gp}+ GP in last {ACTIVE_ROSTER_WINDOW} games")
+            print(f"   -> Active roster: {len(skaters_last_game)}/{before} skaters with {min_active_gp}+ GP in last {ACTIVE_ROSTER_WINDOW} games")
         else:
-            print(f"   → Active roster: {len(skaters_last_game)} skaters (no GP column found, no threshold applied)")
+            print(f"   -> Active roster: {len(skaters_last_game)} skaters (no GP column found, no threshold applied)")
 
         active_skaters = skaters_last_game[["Player", "Team", "Position"]].copy()
         active_players_list.append(active_skaters)
@@ -555,7 +722,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
         raw = str(row["Team"]) if pd.notna(row["Team"]) else ""
         warning_key = (row["Player"], raw)
         if (',' in raw or '/' in raw) and warning_key not in unresolved_team_warnings:
-            print(f"   ⚠ Could not resolve current team for {row['Player']} (NST: {raw}) — using final-abbreviation fallback")
+            print(f"   WARNING Could not resolve current team for {row['Player']} (NST: {raw}) - using final-abbreviation fallback")
             unresolved_team_warnings.add(warning_key)
         return clean_team_name(row["Team"])
 
@@ -568,7 +735,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     if not goalies_active.empty:
         goalies_active['Position'] = 'G'
         goalies_active["Team"] = goalies_active["Team"].apply(clean_team_name)
-        print(f"   → Active goalies (L{RECENT_GAMES_TGP}): {len(goalies_active)} goalies")
+        print(f"   -> Active goalies (L{RECENT_GAMES_TGP}): {len(goalies_active)} goalies")
 
         # Update team assignments for traded goalies
         if "Player" in goalies_active.columns:
@@ -592,7 +759,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
         # Track active goalies using (Player, Team, Position) for reliable matching
         active_goalies = goalies_active[["Player", "Team", "Position"]].copy()
         active_players_list.append(active_goalies)
-        print(f"   ✓ Identified {len(active_goalies)} active goalies from L{RECENT_GAMES_TGP} (includes backups)")
+        print(f"   OK Identified {len(active_goalies)} active goalies from L{RECENT_GAMES_TGP} (includes backups)")
 
     # Merge and weight stats separately for HOME and AWAY
     print("   Merging and weighting HOME stats...")
@@ -651,9 +818,9 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     home_dupes = skaters_home_renamed.duplicated(subset=merge_keys, keep=False).sum()
     away_dupes = skaters_away_renamed.duplicated(subset=merge_keys, keep=False).sum()
     if home_dupes > 0:
-        print(f"   ⚠ WARNING: {home_dupes} duplicate players in HOME data!")
+        print(f"   WARNING: {home_dupes} duplicate players in HOME data!")
     if away_dupes > 0:
-        print(f"   ⚠ WARNING: {away_dupes} duplicate players in AWAY data!")
+        print(f"   WARNING: {away_dupes} duplicate players in AWAY data!")
 
     skaters_combined = skaters_home_renamed.merge(
         skaters_away_renamed,
@@ -669,7 +836,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
         suffixes=("_home_dup", "_away_dup")
     )
 
-    print(f"   → Combined: {len(skaters_home_renamed)} home + {len(skaters_away_renamed)} away = {len(skaters_combined)} total")
+    print(f"   -> Combined: {len(skaters_home_renamed)} home + {len(skaters_away_renamed)} away = {len(skaters_combined)} total")
 
     # Handle Player_ID: prefer home, fallback to away
     for df in [skaters_combined, goalies_combined]:
@@ -692,7 +859,7 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
             df["GP"] = gp_home + gp_away
             df.drop(columns=[c for c in ["GP_home_dup", "GP_away_dup"] if c in df.columns], inplace=True)
 
-    # Apply GP% filter to skaters only (goalies play fewer games by design — filter separately via TOI)
+    # Apply GP% filter to skaters only (goalies play fewer games by design - filter separately via TOI)
     if MIN_GP_PERCENTAGE > 0 and not skaters_combined.empty and "GP" in skaters_combined.columns:
         team_max_gp = skaters_combined.groupby("Team")["GP"].transform("max")
         min_gp = team_max_gp * MIN_GP_PERCENTAGE
@@ -736,10 +903,14 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
             # Remove any duplicates (shouldn't happen, but safety check)
             active_roster_df = active_roster_df.drop_duplicates(subset=["Player", "Team", "Position"])
             active_roster_df.to_sql("active_roster", conn, if_exists="replace", index=False)
-            print(f"   ✓ Saved {len(active_roster_df)} active roster players (matched by Player+Team+Position)")
+            print(f"   OK Saved {len(active_roster_df)} active roster players (matched by Player+Team+Position)")
+
+        if not special_teams_df.empty:
+            special_teams_df.to_sql("team_special_teams", conn, if_exists="replace", index=False)
+            print(f"   OK Saved special teams table ({len(special_teams_df)} teams)")
 
         conn.close()
-        print(f"   ✓ Success: {len(all_players)} weighted players saved to {db_path}")
+        print(f"   OK Success: {len(all_players)} weighted players saved to {db_path}")
 
     return all_players
 
@@ -766,7 +937,7 @@ def view_team_rosters(db_path, min_toi=None):
             if cursor.fetchone() else None
         conn.close()
     except Exception as e:
-        print(f"   ✗ Could not load player data: {e}")
+        print(f"   FAILED Could not load player data: {e}")
         return
 
     if df.empty:
@@ -810,12 +981,12 @@ def view_team_rosters(db_path, min_toi=None):
 
         # Display HOME stats
         print(f"\n{'='*140}")
-        print(f"{team} — HOME STATS")
+        print(f"{team} - HOME STATS")
         print('='*140)
         display_location_stats(team, team_players, "home", db_path)
 
         # Display AWAY stats
-        print(f"\n{team} — AWAY STATS")
+        print(f"\n{team} - AWAY STATS")
         print('-'*140)
         display_location_stats(team, team_players, "away", db_path)
         print()  # Extra spacing between teams
@@ -953,3 +1124,151 @@ def display_location_stats(team, team_players, location, db_path):
                 goalies_display[col] = goalies_display[col].round(2)
         print(goalies_display.to_string(index=False))
         print()
+
+
+def build_roster_audit(db_path):
+    """Return team-level and player-level roster eligibility audit tables."""
+    conn = sqlite3.connect(db_path)
+    players = pd.read_sql("SELECT Player, Team, Position, GP FROM players", conn)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='active_roster'")
+    active = pd.read_sql("SELECT Player, Team, Position FROM active_roster", conn) \
+        if cursor.fetchone() else pd.DataFrame(columns=["Player", "Team", "Position"])
+    conn.close()
+
+    players["NameKey"] = players["Player"].apply(normalize_player_name_for_match)
+    active["NameKey"] = active["Player"].apply(normalize_player_name_for_match)
+
+    team_rows = []
+    detail_rows = []
+
+    for team in sorted(players["Team"].dropna().unique()):
+        team_players = players[players["Team"] == team].copy()
+        team_active = active[active["Team"] == team].copy()
+
+        skater_mask = team_players["Position"].apply(
+            lambda p: is_forward_position(p) or is_defense_position(p)
+        )
+        team_max_gp = team_players.loc[skater_mask, "GP"].max() if "GP" in team_players.columns else np.nan
+        established_min_gp = team_max_gp * MIN_GP_PERCENTAGE if pd.notna(team_max_gp) else np.inf
+
+        eligible_rows = []
+        active_only_missing = []
+
+        for _, row in team_players.iterrows():
+            active_candidates = team_active[team_active["Player"] == row["Player"]]
+            active_match = any(
+                positions_overlap(row["Position"], pos)
+                for pos in active_candidates["Position"]
+            )
+            established = (
+                not is_goalie_position(row["Position"])
+                and pd.notna(row["GP"])
+                and row["GP"] >= established_min_gp
+            )
+            if active_match or established:
+                eligible_rows.append(row)
+                if established and not active_match:
+                    detail_rows.append({
+                        "Type": "Established not active",
+                        "Team": team,
+                        "Player": row["Player"],
+                        "Position": row["Position"],
+                        "GP": row["GP"],
+                        "Matched Player": "",
+                    })
+
+        eligible = pd.DataFrame(eligible_rows)
+        if not team_active.empty:
+            for _, row in team_active.iterrows():
+                player_candidates = team_players[team_players["Player"] == row["Player"]]
+                matched = any(
+                    positions_overlap(pos, row["Position"])
+                    for pos in player_candidates["Position"]
+                )
+                if not matched:
+                    alias_candidates = team_players[team_players["NameKey"] == row["NameKey"]]
+                    alias_match = any(
+                        positions_overlap(pos, row["Position"])
+                        for pos in alias_candidates["Position"]
+                    )
+                    if alias_match:
+                        detail_rows.append({
+                            "Type": "Active alias match",
+                            "Team": team,
+                            "Player": row["Player"],
+                            "Position": row["Position"],
+                            "GP": np.nan,
+                            "Matched Player": ", ".join(alias_candidates["Player"].unique()),
+                        })
+                        continue
+                    active_only_missing.append(row)
+                    detail_rows.append({
+                        "Type": "Active missing from players",
+                        "Team": team,
+                        "Player": row["Player"],
+                        "Position": row["Position"],
+                        "GP": np.nan,
+                        "Matched Player": "",
+                    })
+
+        if eligible.empty:
+            forwards = defense = goalies = 0
+        else:
+            forwards = int(eligible["Position"].apply(is_forward_position).sum())
+            defense = int(eligible["Position"].apply(is_defense_position).sum())
+            goalies = int(eligible["Position"].apply(is_goalie_position).sum())
+
+        team_rows.append({
+            "Team": team,
+            "Eligible": len(eligible),
+            "F": forwards,
+            "D": defense,
+            "G": goalies,
+            "Active Missing": len(active_only_missing),
+            "Established Added": sum(
+                1 for r in detail_rows
+                if r["Type"] == "Established not active" and r["Team"] == team
+            ),
+        })
+
+    return pd.DataFrame(team_rows), pd.DataFrame(detail_rows)
+
+
+def display_roster_audit(db_path, min_forwards=10, min_defense=5, min_goalies=2,
+                         established_added_warn=5):
+    """Print roster eligibility counts and notable mismatches."""
+    team_audit, detail = build_roster_audit(db_path)
+    if team_audit.empty:
+        print("\nNo roster audit data available.")
+        return team_audit, detail
+
+    flagged = team_audit[
+        (team_audit["F"] < min_forwards)
+        | (team_audit["D"] < min_defense)
+        | (team_audit["G"] < min_goalies)
+        | (team_audit["Active Missing"] > 0)
+        | (team_audit["Established Added"] >= established_added_warn)
+    ].copy()
+
+    alias_count = 0 if detail.empty else int((detail["Type"] == "Active alias match").sum())
+    true_missing_count = 0 if detail.empty else int((detail["Type"] == "Active missing from players").sum())
+
+    print("\n" + "=" * 120)
+    print("ROSTER AUDIT - ELIGIBLE PLAYERS, ACTIVE FEED GAPS, AND ESTABLISHED SKATER RESCUES")
+    print("=" * 120)
+    print(f"Active alias matches: {alias_count} | True active missing rows: {true_missing_count}")
+    print(team_audit.sort_values(["Active Missing", "Established Added"], ascending=False).to_string(index=False))
+
+    if not flagged.empty:
+        print("\nFlagged teams:")
+        print(flagged.sort_values(["Active Missing", "Established Added"], ascending=False).to_string(index=False))
+
+    if not detail.empty:
+        display = detail.copy()
+        if "GP" in display.columns:
+            display["GP"] = display["GP"].round(0)
+        print("\nNotable player-level audit rows:")
+        print(display.sort_values(["Type", "Team", "Player"]).head(80).to_string(index=False))
+
+    return team_audit, detail

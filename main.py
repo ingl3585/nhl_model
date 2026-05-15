@@ -32,6 +32,14 @@ playoff_mode = (not playoff_games.empty) and (~schedule.played).sum() == 0
 # Step 3: Download player data
 download_nst_data(DB_FILE, recent_weight=RECENT_FORM_WEIGHT)
 
+if SHOW_TEAM_PROFILE_REPORT:
+    from team_profile import display_team_profile_report
+    display_team_profile_report(DB_FILE)
+
+if SHOW_ROSTER_AUDIT:
+    from nhl_rosters import display_roster_audit
+    display_roster_audit(DB_FILE)
+
 # Step 4: Today's games predictions (if enabled)
 if SHOW_TODAYS_GAMES:
     print("\n" + "=" * 88)
