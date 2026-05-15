@@ -43,6 +43,30 @@ TEAM_MAP = {
 TEAM_MAP.update(TEAM_ABBREV_FIXES)
 
 
+def position_tokens(position):
+    """Return normalized position tokens from NST values like 'C, L'."""
+    if pd.isna(position):
+        return set()
+    return {p.strip().upper() for p in str(position).replace("/", ",").split(",") if p.strip()}
+
+
+def positions_overlap(left, right):
+    """True when two NST position strings share at least one position token."""
+    return bool(position_tokens(left) & position_tokens(right))
+
+
+def is_forward_position(position):
+    return bool(position_tokens(position) & {"C", "L", "R"})
+
+
+def is_defense_position(position):
+    return "D" in position_tokens(position)
+
+
+def is_goalie_position(position):
+    return "G" in position_tokens(position)
+
+
 def clean_team_name(team_str):
     """
     Clean team name from NST format (handles trades).
@@ -502,6 +526,12 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     if not skaters_last_game.empty and "Player" in skaters_last_game.columns:
         skaters_last_game["Team"] = skaters_last_game["Team"].apply(clean_team_name)
 
+        # Keep current-team assignments before filtering active players. A traded
+        # player with only a few games on his new team may miss the active-roster
+        # threshold, but gpteam is still a stronger signal than the full-season
+        # multi-team string.
+        current_team_map = dict(zip(skaters_last_game["Player"], skaters_last_game["Team"]))
+
         # Find GP column
         gp_col = "GP" if "GP" in skaters_last_game.columns else \
                  "Games Played" if "Games Played" in skaters_last_game.columns else None
@@ -514,16 +544,19 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
         else:
             print(f"   → Active roster: {len(skaters_last_game)} skaters (no GP column found, no threshold applied)")
 
-        current_team_map = dict(zip(skaters_last_game["Player"], skaters_last_game["Team"]))
         active_skaters = skaters_last_game[["Player", "Team", "Position"]].copy()
         active_players_list.append(active_skaters)
+
+    unresolved_team_warnings = set()
 
     def update_team(row):
         if row["Player"] in current_team_map:
             return current_team_map[row["Player"]]
         raw = str(row["Team"]) if pd.notna(row["Team"]) else ""
-        if ',' in raw or '/' in raw:
-            print(f"   ⚠ Could not resolve current team for {row['Player']} (NST: {raw}) — using alphabetical fallback")
+        warning_key = (row["Player"], raw)
+        if (',' in raw or '/' in raw) and warning_key not in unresolved_team_warnings:
+            print(f"   ⚠ Could not resolve current team for {row['Player']} (NST: {raw}) — using final-abbreviation fallback")
+            unresolved_team_warnings.add(warning_key)
         return clean_team_name(row["Team"])
 
     # Apply current team to all datasets
@@ -663,9 +696,31 @@ def download_nst_data(db_path, recent_weight=None, full_weight=None, last_year_w
     if MIN_GP_PERCENTAGE > 0 and not skaters_combined.empty and "GP" in skaters_combined.columns:
         team_max_gp = skaters_combined.groupby("Team")["GP"].transform("max")
         min_gp = team_max_gp * MIN_GP_PERCENTAGE
+        active_skaters_df = pd.concat(
+            [df for df in active_players_list if not df.empty and "Position" in df.columns],
+            ignore_index=True
+        ) if active_players_list else pd.DataFrame()
+        if not active_skaters_df.empty:
+            active_skaters_df = active_skaters_df[
+                active_skaters_df["Position"].apply(is_forward_position)
+                | active_skaters_df["Position"].apply(is_defense_position)
+            ].copy()
+
+        def is_active_skater(row):
+            if active_skaters_df.empty:
+                return False
+            candidates = active_skaters_df[
+                (active_skaters_df["Player"] == row["Player"])
+                & (active_skaters_df["Team"] == row["Team"])
+            ]
+            return any(positions_overlap(row["Position"], pos) for pos in candidates["Position"])
+
         before = len(skaters_combined)
-        skaters_combined = skaters_combined[skaters_combined["GP"] >= min_gp].copy()
-        print(f"   → GP filter ({MIN_GP_PERCENTAGE:.0%} of team games): removed {before - len(skaters_combined)} skaters, kept {len(skaters_combined)}")
+        active_mask = skaters_combined.apply(is_active_skater, axis=1)
+        keep_mask = (skaters_combined["GP"] >= min_gp) | active_mask
+        active_exemptions = int((active_mask & (skaters_combined["GP"] < min_gp)).sum())
+        skaters_combined = skaters_combined[keep_mask].copy()
+        print(f"   -> GP filter ({MIN_GP_PERCENTAGE:.0%} of team games): removed {before - len(skaters_combined)} skaters, kept {len(skaters_combined)} ({active_exemptions} active exemptions)")
 
     # Combine skaters and goalies
     all_players = pd.concat([skaters_combined, goalies_combined], ignore_index=True, sort=False)
@@ -726,9 +781,29 @@ def view_team_rosters(db_path, min_toi=None):
         team_players = df[df["Team"] == team].copy()
 
         if active_roster_df is not None:
-            team_players = team_players.merge(
-                active_roster_df, on=["Player", "Team", "Position"], how="inner"
+            team_active = active_roster_df[active_roster_df["Team"] == team]
+            skater_mask = team_players["Position"].apply(
+                lambda p: is_forward_position(p) or is_defense_position(p)
             )
+            team_max_gp = team_players.loc[skater_mask, "GP"].max() if "GP" in team_players.columns else np.nan
+            established_min_gp = team_max_gp * MIN_GP_PERCENTAGE if pd.notna(team_max_gp) else np.inf
+
+            def is_active_or_established(row):
+                active_candidates = team_active[team_active["Player"] == row["Player"]]
+                active_match = any(
+                    positions_overlap(row["Position"], pos)
+                    for pos in active_candidates["Position"]
+                )
+                established_skater = (
+                    not is_goalie_position(row["Position"])
+                    and pd.notna(row.get("GP"))
+                    and row["GP"] >= established_min_gp
+                )
+                return active_match or established_skater
+
+            team_players = team_players[
+                team_players.apply(is_active_or_established, axis=1)
+            ].copy()
 
         if team_players.empty:
             continue
@@ -776,10 +851,19 @@ def display_location_stats(team, team_players, location, db_path):
     xga_goalie_col = f"xG Against/60_{location}"
     gaa_col = f"GAA_{location}"
 
+    # Keep each split-specific dump honest: players with no TOI for this
+    # location do not have meaningful home/away stats to display.
+    if toi_col in team_players.columns:
+        team_players = team_players[pd.to_numeric(team_players[toi_col], errors="coerce").fillna(0) > 0].copy()
+        if team_players.empty:
+            print(f"No players with {location.upper()} TOI available.")
+            print()
+            return
+
     # Split by position
-    forwards = team_players[team_players['Position'].isin(['C', 'L', 'R'])].copy() if 'Position' in team_players.columns else pd.DataFrame()
-    defensemen = team_players[team_players['Position'] == 'D'].copy() if 'Position' in team_players.columns else pd.DataFrame()
-    goalies = team_players[team_players['Position'] == 'G'].copy() if 'Position' in team_players.columns else pd.DataFrame()
+    forwards = team_players[team_players['Position'].apply(is_forward_position)].copy() if 'Position' in team_players.columns else pd.DataFrame()
+    defensemen = team_players[team_players['Position'].apply(is_defense_position)].copy() if 'Position' in team_players.columns else pd.DataFrame()
+    goalies = team_players[team_players['Position'].apply(is_goalie_position)].copy() if 'Position' in team_players.columns else pd.DataFrame()
 
     # Calculate contributions if we have the required columns
     if not team_players.empty and xgf_col in team_players.columns and xga_col in team_players.columns and toi_col in team_players.columns:

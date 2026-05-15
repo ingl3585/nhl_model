@@ -33,6 +33,13 @@ N_SIMS_TODAY = 100001                  # Simulations per today's game
 LEAGUE_AVG_XG_PER_60 = 3.10            # All-situations league average (updated from 2.95 for 5v5)
 OT_HOME_WIN_PROB = 0.51                # Empirical 2025-26: 49.1% (160/326). Historical ~51%.
 TEAM_STRENGTH_VARIANCE = 0.15          # ±15% game-to-game variance (injuries, form, etc.)
+GAME_PACE_VARIANCE = 0.08              # Shared game tempo variance; raises/lowers both teams' xG
+SCORING_CORRELATION = 0.35             # Shared Poisson component; increases realistic tied-game rates
+MIN_GAME_XG = 0.5                      # Floor for simulated regulation expected goals
+MAX_GAME_XG = 6.0                      # Ceiling for simulated regulation expected goals
+OT_ENDS_IN_GOAL_PROB = 0.67            # Probability overtime ends before shootout
+OT_SKILL_WEIGHT = 0.30                 # Weight of regulation xG edge in OT winner probability
+SHOOTOUT_HOME_WIN_PROB = 0.52          # Shootouts are close to coin flips
 
 # Position weights for team strength calculations (must sum to 1.0)
 FORWARD_OFFENSE_WEIGHT = 0.85          # Forwards drive 85% of offense
@@ -72,7 +79,7 @@ XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
 # DISPLAY SETTINGS
 # =============================================================================
 SHOW_TODAYS_GAMES = True
-SHOW_ROSTER_DUMP = False               # Set True if you want full roster print
+SHOW_ROSTER_DUMP = True               # Set True if you want full roster print
 SHOW_PROGRESS_EVERY = 2000             # Print progress every N sims
 
 # =============================================================================
@@ -108,4 +115,4 @@ TODAY_GAMES_GRID_COLS = 2               # Columns for game cards (2 or 3)
 CUP_CHART_TOP_N = 20                    # Number of teams in Cup chart
 HEATMAP_COLORMAP = "Blues"              # Matplotlib colormap name
 
-print(f"Config loaded → Season {CURRENT_SEASON_FULL} | Today: {TODAY_PRETTY}")
+print(f"Config loaded -> Season {CURRENT_SEASON_FULL} | Today: {TODAY_PRETTY}")

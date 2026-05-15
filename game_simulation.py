@@ -6,7 +6,9 @@ import numpy as np
 from tqdm import tqdm
 from config import (
     LEAGUE_AVG_XG_PER_60, OT_HOME_WIN_PROB,
-    N_SIMS_TODAY, TEAM_STRENGTH_VARIANCE
+    N_SIMS_TODAY, TEAM_STRENGTH_VARIANCE, GAME_PACE_VARIANCE,
+    SCORING_CORRELATION, MIN_GAME_XG, MAX_GAME_XG,
+    OT_ENDS_IN_GOAL_PROB, OT_SKILL_WEIGHT, SHOOTOUT_HOME_WIN_PROB
 )
 from team_strength import get_team_strength
 
@@ -62,6 +64,71 @@ def get_xg_divisor(db_path):
     return divisor
 
 
+def _mean_one_lognormal(variance):
+    """Sample a positive multiplier with mean near 1.0."""
+    if variance <= 0:
+        return 1.0
+    sigma = variance / 2
+    return float(np.random.lognormal(mean=-(sigma ** 2) / 2, sigma=sigma))
+
+
+def calculate_expected_goals(home, away, db_path, use_cache=True, apply_variance=True):
+    """
+    Calculate regulation expected goals for a matchup.
+
+    This is separated from simulate_game() so matchup strength can be inspected
+    directly and the stochastic scoring layer can evolve independently.
+    """
+    if use_cache:
+        ho, hd = get_cached_strength(home, db_path, location="home")
+        ao, ad = get_cached_strength(away, db_path, location="away")
+    else:
+        ho, hd = get_team_strength(home, db_path, location="home")
+        ao, ad = get_team_strength(away, db_path, location="away")
+
+    # A good team night should improve offense and suppress xGA. Lognormal
+    # multipliers avoid invalid negative tails while preserving the average.
+    if apply_variance and TEAM_STRENGTH_VARIANCE > 0:
+        home_form = np.clip(_mean_one_lognormal(TEAM_STRENGTH_VARIANCE), 0.85, 1.15)
+        away_form = np.clip(_mean_one_lognormal(TEAM_STRENGTH_VARIANCE), 0.85, 1.15)
+
+        ho *= home_form
+        hd /= home_form
+        ao *= away_form
+        ad /= away_form
+
+    divisor = get_xg_divisor(db_path)
+    home_xg = ho * ad / divisor
+    away_xg = ao * hd / divisor
+
+    # Hockey games have shared tempo: officiating, score effects, goalie pulls,
+    # and matchup pace tend to move both teams' scoring environments together.
+    if apply_variance and GAME_PACE_VARIANCE > 0:
+        pace = np.clip(_mean_one_lognormal(GAME_PACE_VARIANCE), 0.85, 1.15)
+        home_xg *= pace
+        away_xg *= pace
+
+    home_xg = max(MIN_GAME_XG, min(home_xg, MAX_GAME_XG))
+    away_xg = max(MIN_GAME_XG, min(away_xg, MAX_GAME_XG))
+
+    return home_xg, away_xg
+
+
+def simulate_regulation_score(home_xg, away_xg):
+    """
+    Simulate regulation scoring with a small shared Poisson component.
+
+    Independent Poisson goals understate tied games in hockey. A shared scoring
+    component preserves each team's xG while letting game environment influence
+    both scores in the same direction.
+    """
+    shared_xg = min(home_xg, away_xg) * max(0, min(SCORING_CORRELATION, 0.5))
+    shared_goals = np.random.poisson(shared_xg) if shared_xg > 0 else 0
+    home_goals = shared_goals + np.random.poisson(max(home_xg - shared_xg, 0))
+    away_goals = shared_goals + np.random.poisson(max(away_xg - shared_xg, 0))
+    return int(home_goals), int(away_goals)
+
+
 def simulate_overtime(home_xg, away_xg):
     """
     Simulate overtime with skill-adjusted probabilities.
@@ -73,10 +140,6 @@ def simulate_overtime(home_xg, away_xg):
     Returns:
         tuple: (is_home_winner, win_type) where win_type is 'OT' or 'SO'
     """
-    OT_ENDS_IN_GOAL_PROB = 0.67  # ~67% of OT ends before shootout
-    HOME_SHOOTOUT_ADVANTAGE = 0.52  # Shootouts nearly 50/50
-    SKILL_WEIGHT_OT = 0.30  # Reduced skill weight in OT (more random)
-
     # Calculate skill-based edge in OT
     total_xg = home_xg + away_xg
     if total_xg > 0:
@@ -85,17 +148,17 @@ def simulate_overtime(home_xg, away_xg):
         home_skill_edge = 0.5
 
     # Blend skill with base home advantage, regressed toward 50%
-    home_ot_prob = (home_skill_edge * SKILL_WEIGHT_OT) + (OT_HOME_WIN_PROB * (1 - SKILL_WEIGHT_OT))
+    home_ot_prob = (home_skill_edge * OT_SKILL_WEIGHT) + (OT_HOME_WIN_PROB * (1 - OT_SKILL_WEIGHT))
 
     if np.random.rand() < OT_ENDS_IN_GOAL_PROB:
         return np.random.rand() < home_ot_prob, 'OT'
     else:
-        return np.random.rand() < HOME_SHOOTOUT_ADVANTAGE, 'SO'
+        return np.random.rand() < SHOOTOUT_HOME_WIN_PROB, 'SO'
 
 
 def simulate_game(home, away, db_path, use_cache=True):
     """
-    Simulate a single NHL game using Poisson distribution.
+    Simulate a single NHL game using correlated Poisson scoring.
 
     Args:
         home (str): Home team name
@@ -107,41 +170,8 @@ def simulate_game(home, away, db_path, use_cache=True):
         tuple: (winner, home_pts, away_pts, home_goals, away_goals, win_type)
                win_type is 'REG', 'OT', or 'SO'
     """
-    # Get team strengths with location (home team plays at home, away team plays away)
-    if use_cache:
-        ho, hd = get_cached_strength(home, db_path, location="home")
-        ao, ad = get_cached_strength(away, db_path, location="away")
-    else:
-        ho, hd = get_team_strength(home, db_path, location="home")
-        ao, ad = get_team_strength(away, db_path, location="away")
-
-    # Per-team form variance: a "good night" should raise offense AND lower xGA (better defense).
-    # Previous version multiplied both ho and hd by the same factor, which falsely made defense
-    # *worse* on a team's good night (higher xGA = more goals allowed).
-    if TEAM_STRENGTH_VARIANCE > 0:
-        sigma = TEAM_STRENGTH_VARIANCE / 2
-        home_form = np.clip(np.random.normal(1.0, sigma), 0.85, 1.15)
-        away_form = np.clip(np.random.normal(1.0, sigma), 0.85, 1.15)
-
-        ho *= home_form
-        hd /= home_form
-        ao *= away_form
-        ad /= away_form
-
-    # Calculate expected goals using location-specific team strength.
-    # Home ice advantage is built into the home/away stats (no multiplier needed).
-    # Divisor is calibrated empirically (see get_xg_divisor) so league-average teams
-    # produce league-average xG; using LEAGUE_AVG_XG_PER_60 directly inflates totals.
-    divisor = get_xg_divisor(db_path)
-    home_xg = ho * ad / divisor
-    away_xg = ao * hd / divisor
-
-    home_xg = max(0.5, min(home_xg, 6.0))
-    away_xg = max(0.5, min(away_xg, 6.0))
-
-    # Simulate goals
-    hg = np.random.poisson(home_xg)
-    ag = np.random.poisson(away_xg)
+    home_xg, away_xg = calculate_expected_goals(home, away, db_path, use_cache=use_cache)
+    hg, ag = simulate_regulation_score(home_xg, away_xg)
 
     if hg > ag:
         return home, 2, 0, hg, ag, 'REG'

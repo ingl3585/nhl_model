@@ -49,7 +49,7 @@ if SHOW_TODAYS_GAMES:
         for pred in predictions:
             print(f"{pred['away']} — {pred['away_avg_goals']:.2f} GF — {pred['away_pct']:.1%} to win")
             print(f"{pred['home']} — {pred['home_avg_goals']:.2f} GF — {pred['home_pct']:.1%} to win")
-            print(f"   → Favorite: {pred['favorite']} | Expected Total: ~{pred['expected_total']}")
+            print(f"   -> Favorite: {pred['favorite']} | Expected Total: ~{pred['expected_total']}")
             print("-" * 60)
 
         # Generate today's games visualization
@@ -60,7 +60,7 @@ if SHOW_TODAYS_GAMES:
                 date_str=TODAY_PRETTY
             )
             if viz_paths.get('today_games'):
-                print(f"   Today's games chart saved → {viz_paths['today_games']}\n")
+                print(f"   Today's games chart saved -> {viz_paths['today_games']}\n")
 
     print("=" * 88 + "\n")
 
@@ -135,7 +135,7 @@ print("\n" + "=" * 120)
 print(f"NHL {CURRENT_SEASON_FULL} FINAL RESULTS — {N_SIMS_FULL:,} sims in {elapsed:.0f}s".center(120))
 print("=" * 120)
 print(final_df.to_string(index=False))
-print(f"\nResults saved → {PREDICTIONS_CSV}")
+print(f"\nResults saved -> {PREDICTIONS_CSV}")
 final_df.to_csv(PREDICTIONS_CSV, index=False)
 
 # Generate all probability visualizations

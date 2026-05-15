@@ -3,7 +3,10 @@
 
 import pandas as pd
 import sqlite3
-from config import FALLBACK_OFFENSIVE_RATING, FALLBACK_DEFENSIVE_RATING, ACTUAL_GOALS_WEIGHT, XG_WEIGHT
+from config import (
+    FALLBACK_OFFENSIVE_RATING, FALLBACK_DEFENSIVE_RATING,
+    ACTUAL_GOALS_WEIGHT, XG_WEIGHT, MIN_GP_PERCENTAGE
+)
 
 
 def get_team_strength(team, db_path, location):
@@ -50,10 +53,37 @@ def get_team_strength(team, db_path, location):
     xga_goalie_col = f"xG Against/60_{location}"
     gaa_col = f"GAA_{location}"
 
+    def has_position(pos_expr, token):
+        return f"instr(',' || replace({pos_expr}, ' ', '') || ',', ',{token},') > 0"
+
+    position_expr = "p.Position" if has_active_roster else "Position"
+    forward_cond = " OR ".join(has_position(position_expr, token) for token in ("C", "L", "R"))
+    defense_cond = has_position(position_expr, "D")
+    goalie_cond = has_position(position_expr, "G")
+    skater_cond = f"({forward_cond} OR {defense_cond})"
+
     if has_active_roster:
-        from_clause = '''FROM players p
-            INNER JOIN active_roster ar ON p.Player = ar.Player AND p.Team = ar.Team AND p.Position = ar.Position'''
-        where_clause = "WHERE p.Team = ?"
+        position_overlap = " OR ".join(
+            f"({has_position('p.Position', token)} AND {has_position('ar.Position', token)})"
+            for token in ("C", "L", "R", "D", "G")
+        )
+        active_match = f'''EXISTS (
+                SELECT 1 FROM active_roster ar
+                WHERE ar.Player = p.Player
+                  AND ar.Team = p.Team
+                  AND ({position_overlap})
+            )'''
+        established_skater = f'''(
+                {skater_cond}
+                AND p.GP >= (
+                    SELECT MAX(p2.GP) * {MIN_GP_PERCENTAGE}
+                    FROM players p2
+                    WHERE p2.Team = p.Team
+                      AND ({forward_cond.replace('p.', 'p2.')} OR {defense_cond.replace('p.', 'p2.')})
+                )
+            )'''
+        from_clause = "FROM players p"
+        where_clause = f"WHERE p.Team = ? AND ({active_match} OR {established_skater})"
         pos_prefix = "p."
     else:
         from_clause = "FROM players"
@@ -63,39 +93,39 @@ def get_team_strength(team, db_path, location):
     query = f'''
         SELECT
             -- Forward offense (xGF/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{xgf_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{toi_col}" END), 0) as forward_xgf,
+            COALESCE(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{xgf_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{toi_col}" END), 0) as forward_xgf,
             -- Forward offense (actual GF/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{gf_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{toi_col}" END), 0) as forward_gf,
+            COALESCE(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{gf_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{toi_col}" END), 0) as forward_gf,
 
             -- Defense offense (xGF/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{xgf_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{toi_col}" END), 0) as defense_xgf,
+            COALESCE(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{xgf_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{toi_col}" END), 0) as defense_xgf,
             -- Defense offense (actual GF/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{gf_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{toi_col}" END), 0) as defense_gf,
+            COALESCE(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{gf_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{toi_col}" END), 0) as defense_gf,
 
             -- Forward defense (xGA/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{xga_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{toi_col}" END), 0) as forward_xga,
+            COALESCE(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{xga_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{toi_col}" END), 0) as forward_xga,
             -- Forward defense (actual GA/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{ga_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position IN ('C', 'L', 'R') THEN {pos_prefix}"{toi_col}" END), 0) as forward_ga,
+            COALESCE(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{ga_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {forward_cond} THEN {pos_prefix}"{toi_col}" END), 0) as forward_ga,
 
             -- Defense defense (xGA/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{xga_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{toi_col}" END), 0) as defense_xga,
+            COALESCE(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{xga_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{toi_col}" END), 0) as defense_xga,
             -- Defense defense (actual GA/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{ga_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position = 'D' THEN {pos_prefix}"{toi_col}" END), 0) as defense_ga,
+            COALESCE(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{ga_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {defense_cond} THEN {pos_prefix}"{toi_col}" END), 0) as defense_ga,
 
             -- Goalie defense (xG Against/60)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position = 'G' THEN {pos_prefix}"{xga_goalie_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position = 'G' THEN {pos_prefix}"{toi_col}" END), 0) as goalie_xga,
+            COALESCE(SUM(CASE WHEN {goalie_cond} THEN {pos_prefix}"{xga_goalie_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {goalie_cond} THEN {pos_prefix}"{toi_col}" END), 0) as goalie_xga,
             -- Goalie defense (actual GAA)
-            COALESCE(SUM(CASE WHEN {pos_prefix}Position = 'G' THEN {pos_prefix}"{gaa_col}" * {pos_prefix}"{toi_col}" END), 0) /
-            NULLIF(SUM(CASE WHEN {pos_prefix}Position = 'G' THEN {pos_prefix}"{toi_col}" END), 0) as goalie_gaa
+            COALESCE(SUM(CASE WHEN {goalie_cond} THEN {pos_prefix}"{gaa_col}" * {pos_prefix}"{toi_col}" END), 0) /
+            NULLIF(SUM(CASE WHEN {goalie_cond} THEN {pos_prefix}"{toi_col}" END), 0) as goalie_gaa
         {from_clause}
         {where_clause}
     '''
