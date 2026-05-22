@@ -1236,7 +1236,7 @@ def build_roster_audit(db_path):
 
 
 def display_roster_audit(db_path, min_forwards=10, min_defense=5, min_goalies=2,
-                         established_added_warn=5):
+                         established_added_warn=5, detail_level="compact"):
     """Print roster eligibility counts and notable mismatches."""
     team_audit, detail = build_roster_audit(db_path)
     if team_audit.empty:
@@ -1253,18 +1253,49 @@ def display_roster_audit(db_path, min_forwards=10, min_defense=5, min_goalies=2,
 
     alias_count = 0 if detail.empty else int((detail["Type"] == "Active alias match").sum())
     true_missing_count = 0 if detail.empty else int((detail["Type"] == "Active missing from players").sum())
+    established_count = 0 if detail.empty else int((detail["Type"] == "Established not active").sum())
 
     print("\n" + "=" * 120)
-    print("ROSTER AUDIT - ELIGIBLE PLAYERS, ACTIVE FEED GAPS, AND ESTABLISHED SKATER RESCUES")
+    print("ROSTER AUDIT")
     print("=" * 120)
-    print(f"Active alias matches: {alias_count} | True active missing rows: {true_missing_count}")
+    print(
+        f"Active aliases: {alias_count} | Active missing: {true_missing_count} | "
+        f"Established rescues: {established_count}"
+    )
+
+    if detail_level == "compact":
+        if flagged.empty:
+            print("Roster audit clean: no teams below position minimums or rescue warning threshold.")
+        else:
+            print("Flagged teams:")
+            print(flagged.sort_values(["Active Missing", "Established Added"], ascending=False).to_string(index=False))
+        return team_audit, detail
+
+    if detail_level == "flagged":
+        if flagged.empty:
+            print("Roster audit clean: no teams below position minimums or rescue warning threshold.")
+            return team_audit, detail
+
+        print("Flagged teams:")
+        print(flagged.sort_values(["Active Missing", "Established Added"], ascending=False).to_string(index=False))
+
+        if not detail.empty:
+            flagged_teams = set(flagged["Team"])
+            display = detail[detail["Team"].isin(flagged_teams)].copy()
+            if not display.empty:
+                if "GP" in display.columns:
+                    display["GP"] = display["GP"].round(0)
+                print("\nFlagged player-level audit rows:")
+                print(display.sort_values(["Type", "Team", "Player"]).to_string(index=False))
+        return team_audit, detail
+
     print(team_audit.sort_values(["Active Missing", "Established Added"], ascending=False).to_string(index=False))
 
     if not flagged.empty:
         print("\nFlagged teams:")
         print(flagged.sort_values(["Active Missing", "Established Added"], ascending=False).to_string(index=False))
 
-    if not detail.empty:
+    if detail_level == "full" and not detail.empty:
         display = detail.copy()
         if "GP" in display.columns:
             display["GP"] = display["GP"].round(0)

@@ -38,7 +38,7 @@ if SHOW_TEAM_PROFILE_REPORT:
 
 if SHOW_ROSTER_AUDIT:
     from nhl_rosters import display_roster_audit
-    display_roster_audit(DB_FILE)
+    display_roster_audit(DB_FILE, detail_level=ROSTER_AUDIT_DETAIL)
 
 # Step 4: Today's games predictions (if enabled)
 if SHOW_TODAYS_GAMES:

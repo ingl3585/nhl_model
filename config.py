@@ -26,7 +26,7 @@ PREDICTIONS_CSV = f"data/results/nhl_predictions_{TODAY.strftime('%Y%m%d')}.csv"
 # =============================================================================
 # SIMULATION SETTINGS
 # =============================================================================
-N_SIMS_FULL = 1001                     # Full season simulations
+N_SIMS_FULL = 5001                     # Full season simulations
 N_SIMS_TODAY = 100001                  # Simulations per today's game
 # HOME_ICE_ADVANTAGE removed - now using actual home/away player stats from NST
 # Home advantage is built into the empirical performance differences between locations
@@ -87,9 +87,10 @@ XG_WEIGHT = 0.70            # 70% expected goals (xGF/60, xGA/60)
 # DISPLAY SETTINGS
 # =============================================================================
 SHOW_TODAYS_GAMES = True
-SHOW_ROSTER_DUMP = True               # Set True if you want full roster print
+SHOW_ROSTER_DUMP = False              # Set True if you want full roster print
 SHOW_TEAM_PROFILE_REPORT = True       # Print derived top-end/depth profile modifiers
 SHOW_ROSTER_AUDIT = True              # Print roster eligibility warnings and position counts
+ROSTER_AUDIT_DETAIL = "compact"       # "compact", "flagged", or "full"
 SHOW_PROGRESS_EVERY = 2000             # Print progress every N sims
 
 # =============================================================================
